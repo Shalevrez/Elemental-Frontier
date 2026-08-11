@@ -112,9 +112,11 @@ export function tickOxygen(state: OxygenState, dt: number, ctx: OxygenContext): 
     if (before > 0 && state.oxygen <= 0) justEmptied = true;
 
     if (state.oxygen <= 0) {
-      state.drownTimer += dt;
+      // Clamp the accumulator: a single very long frame (a stall, or a save
+      // being replayed) must not bank up several drowning ticks at once.
+      state.drownTimer = Math.min(DROWN_INTERVAL, state.drownTimer + dt);
       if (state.drownTimer >= DROWN_INTERVAL) {
-        state.drownTimer -= DROWN_INTERVAL;
+        state.drownTimer = 0;
         damage = Math.max(DROWN_MINIMUM, ctx.maxHealth * DROWN_FRACTION);
         state.drowningTick = true;
       }

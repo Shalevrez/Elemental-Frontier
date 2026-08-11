@@ -491,12 +491,24 @@ export class AbilitySystem {
     kb: THREE.Vector3 | null,
     stagger = 0,
     status?: { id: StatusId; seconds: number; magnitude?: number },
+    hitPoint?: THREE.Vector3 | null,
   ): number {
     const m = this.mods;
     const crit = this.rollCrit();
     // Executioner-style tradeoffs cut the damage of a *normal* hit only, so a
     // crit build keeps its ceiling while its floor drops.
     let value = amount * (crit ? m.critScale : m.normalHitScale);
+
+    // Weak points: a shot into an exposed core, a cracked seam or a soft
+    // underside is worth far more than one into the armour.
+    let weakPoint = false;
+    if (hitPoint) {
+      const bonus = e.weakPointBonus(hitPoint.x, hitPoint.y, hitPoint.z);
+      if (bonus > 1) {
+        value *= bonus;
+        weakPoint = true;
+      }
+    }
 
     // `deep-current`: wet targets are far more fragile.
     if (this.hasG('deep-current') && e.status.has('wet')) value *= 1.35;
@@ -589,11 +601,15 @@ export class AbilitySystem {
     const outcome: HitOutcome = wasAlive && !e.alive ? 'kill'
       : resistance <= IMMUNE_THRESHOLD ? 'immune'
         : resistance < RESIST_THRESHOLD ? 'resist'
-          : crit ? 'crit'
+          : (crit || weakPoint) ? 'crit'
             : (status || reaction) ? 'status'
               : 'normal';
     this.ctx.confirmHit(outcome);
     this.ctx.dealtDamage();
+    if (weakPoint) {
+      this.ctx.toast(`Weak point · ${e.type.weakPointName ?? 'exposed'}`, 'good');
+      this.ctx.hitStop(0.05);
+    }
     if (crit) this.ctx.hitStop(0.045);
     return dealt;
   }
@@ -727,9 +743,20 @@ export class AbilitySystem {
     }
     if (struck > 0) audio.play('impact', 60);
 
+    // Air moves the world as well as the creatures in it: smoke and steam are
+    // blown clear, and any fire it passes over is fanned wider.
+    const ahead = _origin.clone().addScaledVector(_dir, range * 0.6);
+    if (this.ctx.effects) {
+      const cleared = this.ctx.effects.clearObscurants(ahead.x, ahead.z, range * 0.5);
+      const fanned = this.ctx.effects.fanFlames(ahead.x, ahead.z, range * 0.5);
+      if (cleared > 0 || fanned > 0) this.charge('terrain');
+      if (fanned > 0) this.ctx.toast('The wind spreads the fire', 'warn');
+    }
+
     const reflectToSource = this.hasG('gust-reflect-source');
     const deflected = projectiles.deflect(_origin, _dir, range, cosHalf, 22, reflectToSource);
     if (deflected > 0) {
+      this.charge('deflect');
       this.ctx.toast(`Deflected ${deflected} projectile${deflected === 1 ? '' : 's'}`, 'good');
       this.ctx.hitMarker(true);
       audio.play('impact', 40);
@@ -953,6 +980,17 @@ export class AbilitySystem {
       const ground = this.ctx.world.raycast(_target, _down, 6);
       if (ground) {
         decals.add('wet', ground.point.x, ground.point.y, ground.point.z, ground.normal, 2.2, 9, 0.5);
+        // Wet ground puts out burning ground and gives Freeze something to
+        // work with, which is the two-step Water combo made physical.
+        this.ctx.effects?.add(
+          'wet', ground.point.x, ground.point.y, ground.point.z,
+          2.2 * this.mods.areaScale, 9, 0, 'player',
+        );
+        // Water meeting lava crusts the surface over into temporary stone.
+        if (this.ctx.world.inHazardFluid(ground.point.y)) {
+          this.ctx.effects?.quenchLava(ground.point.x, ground.point.z, this.ctx.world.fluidLevel, 2.6);
+          this.charge('terrain');
+        }
         particles.spark({
           count: 10, x: ground.point.x, y: ground.point.y + 0.2, z: ground.point.z,
           spread: 0.5, vy: 2.4, jitter: 2, color: ELEMENTS.water.color, color2: 0xffffff,
@@ -991,9 +1029,17 @@ export class AbilitySystem {
     }
 
     // Make the area of effect unmistakable: a ring of frost on the ground plus
-    // a burst at the centre.
+    // a burst at the centre. The frost is a real ground effect - it puts out
+    // burning ground and makes the surface slippery until it thaws.
     const ground = world.raycast(_target, _down, 8);
-    if (ground) decals.add('ice', ground.point.x, ground.point.y, ground.point.z, ground.normal, cfg.radius, 10, 0.75);
+    if (ground) {
+      decals.add('ice', ground.point.x, ground.point.y, ground.point.z, ground.normal, cfg.radius, 10, 0.75);
+      this.ctx.effects?.add(
+        'ice', ground.point.x, ground.point.y, ground.point.z,
+        cfg.radius * this.mods.areaScale, 12, 0, 'player',
+      );
+      this.charge('terrain');
+    }
     for (let i = 0; i < 40; i++) {
       const a = (i / 40) * Math.PI * 2;
       particles.spark({

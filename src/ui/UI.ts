@@ -454,8 +454,10 @@ export class UI {
     root.style.setProperty('--accent', cssColor(affinity === 'convergence' ? el0.color : pres.color));
     root.style.setProperty('--accent-deep', cssColor(affinity === 'convergence' ? el0.deep : pres.deep));
     this.buildElementRail(active, affinity === 'convergence');
-    el<HTMLElement>('ability-primary').querySelector('.ability-name')!.textContent = el0.primary.name;
-    el<HTMLElement>('ability-secondary').querySelector('.ability-name')!.textContent = el0.secondary.name;
+    // The ability rail is rebuilt from the HUD state every frame, so switching
+    // element only has to invalidate its signature.
+    this.lastAbilitySignature = '';
+    void el0;
   }
 
   private buildElementRail(active: ElementId, convergence: boolean): void {

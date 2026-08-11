@@ -444,9 +444,12 @@ export class Game {
     this.renderer.setAntialias(this.settings.antialias);
     this.world.setShadowCasting(this.settings.shadows);
     this.world.setMeshBudget(4 * this.settings.terrainDetail);
-    this.particles.setDensity(this.settings.particleDensity);
-    this.decals.setBudget(24 + this.settings.particleDensity * 48);
-    this.weather.setDensityScale(this.settings.particleDensity);
+    // The accessibility toggle thins particles further, on top of the quality
+    // preset, for players who find dense effects hard to read.
+    const particleScale = this.settings.particleDensity * (this.settings.reducedParticles ? 0.4 : 1);
+    this.particles.setDensity(particleScale);
+    this.decals.setBudget(24 + particleScale * 48);
+    this.weather.setDensityScale(particleScale);
     this.maxPulseLights = this.settings.postProcessing ? 5 : 2;
     this.projectiles.setMaxLights(this.settings.postProcessing ? 4 : 2);
     this.audio.setVolumes({
@@ -695,6 +698,9 @@ export class Game {
     this.ui.applyTheme(this.affinity, this.activeElement);
     this.input.requestLock();
     this.persist();
+    // The opening plays once per save; each world introduces itself once.
+    this.playStory(this.story.pending('opening'));
+    this.playStory(this.story.pending('world-intro', this.worldId));
   }
 
   private pause(): void {
@@ -739,10 +745,17 @@ export class Game {
     this.setState('title');
   }
 
+  /**
+   * Continue after the ending.
+   *
+   * Nothing is reset: the same element, the same powers, the same upgrades and
+   * the same Ultimate. The worlds simply stay open.
+   */
   private continueAfterVictory(): void {
     this.audio.play('ui-click');
     this.setState('playing');
     this.input.requestLock();
+    this.playStory(this.story.pending('post-game'));
   }
 
   private cancelConfirm(): void {
@@ -909,7 +922,9 @@ export class Game {
     this.lastTime = now;
     let dt = Math.min(0.05, Math.max(0, rawDt));
 
-    // Hit-stop: briefly slow time so heavy impacts land with weight.
+    // Hit-stop: briefly slow time so heavy impacts land with weight. Players
+    // who have asked for reduced distortion get a much lighter version.
+    if (this.settings.reducedDistortion && this.hitStopTimer > 0) this.hitStopTimer *= 0.4;
     if (this.hitStopTimer > 0) {
       this.hitStopTimer -= dt;
       dt *= 0.12;
@@ -933,6 +948,13 @@ export class Game {
       this.flora.update(dt);
       this.props.update(dt, this.renderer.camera.position, this.renderer.renderDistanceUnits);
       this.world.update(dt, this.renderer.camera, this.renderer.renderDistanceUnits);
+    }
+
+    // The loading screen is pure DOM: skip the 3D pass entirely so every
+    // available millisecond goes into building the world.
+    if (this.state === 'loading') {
+      this.input.endFrame();
+      return;
     }
 
     const hasWorld = !!this.world.density;
@@ -967,12 +989,27 @@ export class Game {
   }
 
   private stepLoading(): void {
-    const budgetEnd = performance.now() + 14;
+    // Nothing else is happening while the world is being built, so the loading
+    // step gets a generous slice of the frame. On a slow machine this is the
+    // difference between a loading screen that finishes and one that crawls.
+    const budgetEnd = performance.now() + 60;
     let last = { progress: 0, note: '' };
-    while (performance.now() < budgetEnd && this.loadIterator) {
-      const step = this.loadIterator.next();
-      if (step.done) { this.loadIterator = null; break; }
-      last = step.value;
+    try {
+      while (performance.now() < budgetEnd && this.loadIterator) {
+        const step = this.loadIterator.next();
+        if (step.done) { this.loadIterator = null; break; }
+        last = step.value;
+      }
+    } catch (error) {
+      // A failure here used to leave the loading screen spinning forever.
+      // Surface it and return to the title instead of hanging.
+      this.loadIterator = null;
+      // eslint-disable-next-line no-console
+      console.error('[Elemental Frontier] world load failed', error);
+      this.ui.toast('The world could not be loaded - returning to the title', 'bad', 5);
+      this.refreshTitle();
+      this.setState('title');
+      return;
     }
     if (last.note) this.ui.setLoading(last.progress, last.note);
   }
@@ -1596,6 +1633,8 @@ export class Game {
       if (interaction.status === 'guardian') {
         this.ui.setPrompt(`${name} · the guardian still stands`, '!');
         this.cleanseProgress = 0;
+        // A short beat before the fight, once per world, never mid-combat.
+        this.playStory(this.story.pending('pre-boss', this.worldId));
         return;
       }
       if (interaction.status === 'ritual') {
@@ -1777,6 +1816,18 @@ export class Game {
     this.enemies.setCleansed(this.save.shrines);
     this.tracker.shrineCleansed = true;
 
+    // The first restored shrine awakens the element's Ultimate. Once unlocked
+    // it stays unlocked, across worlds, deaths and New Game Plus.
+    if (!this.ultimate.unlocked) {
+      this.ultimate.unlocked = true;
+      this.save.ultimateUnlocked = true;
+      this.ui.toast(
+        `${ELEMENTS[this.activeElement].ultimate.name} awakens — fill the meter, then middle-click or press R`,
+        'good', 5,
+      );
+      this.playStory(this.story.pending('first-heart'));
+    }
+
     this.audio.play('shrine-cleanse');
     this.player.addShake(0.5, 3);
     this.ui.elementFlash(ELEMENTS[SHRINE_SITES[index]!.element].color, 0.5);
@@ -1843,10 +1894,12 @@ export class Game {
     this.shrines.markGuardianDefeated(index);
     if (this.save) {
       this.save.guardians[index] = true;
+      // Save immediately after a boss falls, so the win can never be lost.
       this.persist();
     }
     const site = SHRINE_SITES[index]!;
     this.ui.toast(`The guardian of the ${ELEMENTS[site.element].shrineName} falls`, 'good', 3.4);
+    this.playStory(this.story.pending('guardian-defeated'));
   }
 
   // ------------------------------------------------------------- combat
@@ -1856,6 +1909,10 @@ export class Game {
     const dealt = this.player.applyDamage(amount, from, knockback);
     if (dealt <= 0) return;
     notifyDamaged(this.healing);
+    // Surviving a hit feeds the Ultimate, but only up to a strict cap, so
+    // standing in fire is never a charging strategy.
+    this.addUltimateCharge('damage-taken', dealt);
+    notifyCombat(this.manaState);
     this.audio.play('hurt', 120);
     this.ui.damageFlash(0.3 + Math.min(0.5, dealt / 60));
     this.showDamageDirection(from.x, from.z);
@@ -1894,9 +1951,11 @@ export class Game {
       if (element) {
         // Go through the ability funnel so crits, elemental reactions,
         // lifesteal and upgrade behaviours all apply to projectiles too.
+        // The contact point matters: a shot into a weak point hits far harder.
         this.abilities.hitEnemy(
           enemy, p.damage, element, p.knockback ? kb : null, p.stagger ?? 0,
           p.burn ? { id: 'burning', seconds: 4, magnitude: p.burn } : undefined,
+          point,
         );
       } else {
         enemy.damage(p.damage, null, p.knockback ? kb : null, p.stagger ?? 0);
@@ -2881,6 +2940,100 @@ export class Game {
     this.player.bonusOxygen = m.oxygenCapacity;
     this.player.oxygenDrainScale = m.oxygenDrain;
   }
+
+  // ------------------------------------------------------- development API
+
+  /**
+   * A snapshot of live game state.
+   *
+   * Used by the collision debug overlay and by the automated smoke test, which
+   * drives a real browser through a whole run. It only reads state.
+   */
+  debugSnapshot(): Record<string, unknown> {
+    // Before a world exists there is no density field to query, so anything
+    // that would touch it is reported as unknown rather than throwing.
+    const hasWorld = !!this.world.density;
+    return {
+      state: this.state,
+      hasWorld,
+      world: this.worldId,
+      worldName: worldDef(this.worldId).name,
+      affinity: this.affinity,
+      activeElement: this.activeElement,
+      position: [this.player.position.x, this.player.position.y, this.player.position.z],
+      onGround: this.player.onGround,
+      stuck: hasWorld ? this.player.isStuck() : false,
+      health: this.player.health,
+      maxHealth: this.player.maxHealth,
+      mana: this.player.energy,
+      maxMana: this.player.maxEnergy,
+      manaState: this.manaFeedback,
+      oxygen: this.player.breath,
+      maxOxygen: this.player.maxBreath,
+      submerged: this.player.headInWater,
+      onSlipperyGround: this.player.onSlipperyGround,
+      ultimateUnlocked: this.ultimate.unlocked,
+      ultimateCharge: this.ultimate.charge,
+      ultimateReady: isUltimateReady(this.ultimate),
+      build: this.run.build.toJSON(),
+      buffs: this.buffs.toJSON(),
+      obstacles: this.world.obstacles.size,
+      zones: this.effects.count,
+      deformations: this.effects.deformCount,
+      worldsCompleted: [...this.worldsCompleted],
+      story: this.story.toJSON(),
+      shrines: this.save?.shrines ?? [],
+      respawn: this.lastRespawn,
+      enemies: this.enemies.liveCount,
+      fluidLevel: this.world.fluidLevel,
+      fluidIsHazard: this.world.fluidIsHazard,
+    };
+  }
+
+  /**
+   * Development helpers used by the automated playthrough test.
+   *
+   * Every one of these drives the *real* code path rather than faking a
+   * result, so a passing smoke test means the feature genuinely works.
+   */
+  readonly debug = {
+    respawn: (): void => { this.player.alive = false; this.player.health = 0; },
+    forceRespawn: (): void => { this.respawn(); },
+    teleport: (x: number, y: number, z: number): void => { this.player.teleport(x, y, z); },
+    fillUltimate: (): void => {
+      this.ultimate.unlocked = true;
+      this.ultimate.charge = 100;
+      this.ultimate.lockout = 0;
+    },
+    fireUltimate: (): void => { this.fireUltimate(); },
+    useAbility: (slot: AbilitySlot): void => { this.fireAbility(slot); },
+    openNearestChest: (): boolean => {
+      const chest = this.props.nearestChest(this.player.position, 400);
+      if (!chest) return false;
+      this.player.teleport(chest.position.x, chest.position.y + 1, chest.position.z);
+      this.openChest();
+      return true;
+    },
+    cleanseAllShrines: (): void => {
+      if (!this.save) return;
+      for (let i = 0; i < SHRINE_SITES.length; i++) {
+        this.save.guardians[i] = true;
+        this.shrines.markGuardianDefeated(i);
+        if (!this.save.shrines[i]) this.cleanseShrine(i);
+      }
+      this.setState('playing');
+    },
+    travelNext: (): void => {
+      const target = nextWorld(this.worldId);
+      if (target) this.travelToWorld(target);
+      else this.completeCampaign();
+    },
+    newGamePlus: (): void => { this.startNewGamePlus(); },
+    spendMana: (amount: number): void => { this.player.energy = Math.max(0, this.player.energy - amount); },
+    damage: (amount: number): void => { this.player.applyDamage(amount, null, 0, true); },
+    grantCharge: (source: ChargeSource, magnitude = 1): void => { this.addUltimateCharge(source, magnitude); },
+    snapshot: (): Record<string, unknown> => this.debugSnapshot(),
+  };
 
   private onResize(): void {
     this.viewportW = window.innerWidth;

@@ -1069,12 +1069,15 @@ export function describeStat(key: keyof StatModifiers, value: number, stacks = 1
   const total = value * stacks;
   if (Math.abs(total) < 0.0005) return null;
   if (label.kind === 'percent-flat') {
-    const better = key === 'armor' ? true : total > 0;
+    // Armor reads inverted: positive armor *reduces* damage taken, and a
+    // negative value from a tradeoff card increases it.
+    if (key === 'armor') {
+      return total > 0
+        ? { text: `Damage taken −${pct(total)}`, tone: 'good' }
+        : { text: `Damage taken +${pct(total)}`, tone: 'bad' };
+    }
     const sign = total > 0 ? '+' : '−';
-    const text = key === 'armor'
-      ? `Damage taken −${pct(total)}`
-      : `${label.label} ${sign}${pct(total)}`;
-    return { text, tone: better ? 'good' : 'bad' };
+    return { text: `${label.label} ${sign}${pct(total)}`, tone: total > 0 ? 'good' : 'bad' };
   }
   const sign = total > 0 ? '+' : '−';
   const shown = Math.round(Math.abs(total) * 100) / 100;

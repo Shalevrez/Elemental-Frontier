@@ -41,7 +41,14 @@ function boot(): void {
     const game = new Game(canvas);
     game.start();
     // Expose for debugging in the browser console; harmless in production.
-    (window as unknown as { elementalFrontier?: Game }).elementalFrontier = game;
+    const w = window as unknown as {
+      elementalFrontier?: Game;
+      __gameDebug?: () => Record<string, unknown>;
+      __game?: Game['debug'];
+    };
+    w.elementalFrontier = game;
+    w.__gameDebug = () => game.debugSnapshot();
+    w.__game = game.debug;
   } catch (error) {
     fail('An unexpected error occurred while starting the game.', error);
   }
