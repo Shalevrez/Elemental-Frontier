@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Elemental Frontier - a first-person sandbox adventure of smooth deformable terrain, elemental powers and four blighted shrines." />
+    <title>Elemental Frontier</title>
+  </head>
+  <body>
+    <!-- ============ Original SVG symbol sheet (no external assets) ============ -->
+    <svg class="svg-sheet" aria-hidden="true" focusable="false">
+      <defs>
+        <symbol id="sym-air" viewBox="0 0 64 64">
+          <g fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round">
+            <path d="M10 20h28a7 7 0 1 0-7-7" />
+            <path d="M8 32h38a8 8 0 1 1-8 8" />
+            <path d="M14 44h20a6 6 0 1 1-6 6" />
+          </g>
+        </symbol>
+        <symbol id="sym-water" viewBox="0 0 64 64">
+          <path d="M32 6c10 14 18 22 18 32a18 18 0 1 1-36 0c0-10 8-18 18-32z"
+                fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round" />
+          <path d="M22 40c4 5 8 5 12 0s7-5 9-1" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" />
+        </symbol>
+        <symbol id="sym-earth" viewBox="0 0 64 64">
+          <path d="M32 8 54 22 32 36 10 22z" fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round" />
+          <path d="M10 32 32 46 54 32" fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round" />
+          <path d="M10 42 32 56 54 42" fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="sym-fire" viewBox="0 0 64 64">
+          <path d="M32 5c2 12-10 15-10 26a10 10 0 0 0 20 0c0-5-2-8-4-11 8 4 14 12 14 21a20 20 0 1 1-40 0C12 24 30 22 32 5z"
+                fill="none" stroke="currentColor" stroke-width="4.5" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="sym-convergence" viewBox="0 0 64 64">
+          <circle cx="32" cy="32" r="22" fill="none" stroke="currentColor" stroke-width="4" />
+          <circle cx="32" cy="10" r="5" fill="currentColor" />
+          <circle cx="54" cy="32" r="5" fill="currentColor" />
+          <circle cx="32" cy="54" r="5" fill="currentColor" />
+          <circle cx="10" cy="32" r="5" fill="currentColor" />
+          <circle cx="32" cy="32" r="6.5" fill="none" stroke="currentColor" stroke-width="4" />
+        </symbol>
+        <symbol id="sym-shrine" viewBox="0 0 64 64">
+          <path d="M32 6 48 20v34H16V20z" fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round" />
+          <path d="M32 26v18M24 34h16" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" />
+        </symbol>
+        <symbol id="sym-primary" viewBox="0 0 64 64">
+          <path d="M32 6 40 26l20 6-20 6-8 20-8-20-20-6 20-6z" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="sym-secondary" viewBox="0 0 64 64">
+          <path d="M8 44a24 24 0 0 1 48 0" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" />
+          <circle cx="32" cy="44" r="6" fill="currentColor" />
+          <path d="M32 20v10" stroke="currentColor" stroke-width="5" stroke-linecap="round" />
+        </symbol>
+        <!-- Terrain brush: a sculpting sphere over a contour -->
+        <symbol id="sym-brush" viewBox="0 0 64 64">
+          <circle cx="32" cy="24" r="13" fill="none" stroke="currentColor" stroke-width="4.5" />
+          <path d="M6 46c8-6 16-6 26 0s18 6 26 0" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" />
+          <path d="M20 56c8-4 16-4 24 0" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" opacity=".6" />
+        </symbol>
+        <symbol id="sym-vitality" viewBox="0 0 64 64">
+          <path d="M32 54 12 34a12 12 0 0 1 20-13 12 12 0 0 1 20 13z" fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round" />
+        </symbol>
+        <!-- Berries: a cluster on a sprig -->
+        <symbol id="sym-berries" viewBox="0 0 64 64">
+          <path d="M32 10c0 8-6 12-6 12" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" />
+          <circle cx="22" cy="34" r="9" fill="none" stroke="currentColor" stroke-width="4" />
+          <circle cx="41" cy="30" r="8" fill="none" stroke="currentColor" stroke-width="4" />
+          <circle cx="33" cy="47" r="8.5" fill="none" stroke="currentColor" stroke-width="4" />
+        </symbol>
+        <!-- Cooked meal: a covered bowl -->
+        <symbol id="sym-meal" viewBox="0 0 64 64">
+          <path d="M8 36h48a24 24 0 0 1-48 0z" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linejoin="round" />
+          <path d="M14 30a18 18 0 0 1 36 0" fill="none" stroke="currentColor" stroke-width="4.5" />
+          <path d="M32 12v6" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" />
+          <path d="M6 54h52" stroke="currentColor" stroke-width="4" stroke-linecap="round" opacity=".6" />
+        </symbol>
+        <!-- Minor draught: a slim vial -->
+        <symbol id="sym-vial" viewBox="0 0 64 64">
+          <path d="M26 8h12v14l9 20a10 10 0 0 1-9 14H26a10 10 0 0 1-9-14l9-20z"
+                fill="none" stroke="currentColor" stroke-width="4.5" stroke-linejoin="round" />
+          <path d="M21 40h22" stroke="currentColor" stroke-width="4" stroke-linecap="round" />
+          <path d="M23 6h18" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" />
+        </symbol>
+        <!-- Greater draught: a round stoppered flask -->
+        <symbol id="sym-flask" viewBox="0 0 64 64">
+          <path d="M27 6h10v12" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" />
+          <circle cx="32" cy="38" r="18" fill="none" stroke="currentColor" stroke-width="4.5" />
+          <path d="M18 44c6-5 10 3 15-1s8 2 13-2" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" />
+        </symbol>
+        <!-- Satchel -->
+        <symbol id="sym-satchel" viewBox="0 0 64 64">
+          <path d="M10 24h44v26a6 6 0 0 1-6 6H16a6 6 0 0 1-6-6z" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linejoin="round" />
+          <path d="M20 24V16a12 12 0 0 1 24 0v8" fill="none" stroke="currentColor" stroke-width="4.5" />
+          <path d="M28 36h8" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" />
+        </symbol>
+        <!-- Campfire / rest -->
+        <symbol id="sym-rest" viewBox="0 0 64 64">
+          <path d="M32 10c3 10-8 13-8 22a8 8 0 0 0 16 0c0-4-2-6-3-8 6 3 11 9 11 16a16 16 0 1 1-32 0c0-16 16-18 16-30z"
+                fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round" />
+          <path d="M8 56h48" stroke="currentColor" stroke-width="4" stroke-linecap="round" opacity=".6" />
+        </symbol>
+        <!-- Peaceful mode: a leaf -->
+        <symbol id="sym-peaceful" viewBox="0 0 64 64">
+          <path d="M52 10C24 10 12 24 12 40a14 14 0 0 0 14 14c18 0 26-16 26-44z" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linejoin="round" />
+          <path d="M18 52C28 40 38 28 50 14" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <div id="app">
+      <canvas id="scene"></canvas>
+
+      <!-- ============ In-world overlays ============ -->
+      <div id="fx-vignette" class="fx-layer"></div>
+      <div id="fx-heal" class="fx-layer"></div>
+      <div id="fx-element-flash" class="fx-layer"></div>
+      <div id="fx-fade" class="fx-layer"></div>
+
+      <!-- ============ HUD ============ -->
+      <div id="hud" class="hidden">
+        <div id="combat-debug" class="hidden"></div>
+        <div id="crosshair"><span></span><span></span><span></span><span></span><i></i><b id="crosshair-ring"></b></div>
+
+        <div id="hud-compass" class="panel">
+          <div class="compass-strip"><div id="compass-ticks"></div><div id="compass-marks"></div></div>
+          <div class="compass-needle"></div>
+        </div>
+
+        <div id="hud-objective" class="panel">
+          <svg class="ico"><use href="#sym-shrine" /></svg>
+          <span id="objective-text">Shrines cleansed 0/4</span>
+          <em id="world-mode-tag">Normal</em>
+        </div>
+
+        <div id="hud-left">
+          <div id="vitals">
+            <div class="bar bar-health"><div id="health-fill" class="fill"></div><span id="health-text">100 / 100</span></div>
+            <div class="bar bar-energy"><div id="energy-fill" class="fill"></div><span id="energy-text">100 / 100</span></div>
+            <div id="breath-bar" class="bar bar-breath hidden"><div id="breath-fill" class="fill"></div><span>Breath</span></div>
+          </div>
+          <div id="heal-effect" class="heal-effect hidden"><span>Sunberries</span><i></i></div>
+        </div>
+
+        <div id="hud-bottom">
+          <div id="element-rail"></div>
+          <div id="ability-rail">
+            <div class="ability" id="ability-primary">
+              <div class="ability-icon"><svg class="ico"><use href="#sym-primary" /></svg></div>
+              <div class="cd-sweep"></div>
+              <div class="ability-key">LMB</div>
+              <div class="ability-name">—</div>
+            </div>
+            <div class="ability" id="ability-secondary">
+              <div class="ability-icon"><svg class="ico"><use href="#sym-secondary" /></svg></div>
+              <div class="cd-sweep"></div>
+              <div class="ability-key">RMB</div>
+              <div class="ability-name">—</div>
+            </div>
+          </div>
+
+          <div id="terrain-bar" class="hidden">
+            <div id="material-slots"></div>
+            <div class="brush-info">
+              <span>Brush <b id="brush-size">3.0</b></span>
+              <em>[ ]</em>
+              <span id="brush-mode">full</span>
+            </div>
+          </div>
+
+          <div id="healing-strip">
+            <div id="healing-rail"></div>
+            <div id="potion-cd" class="hidden">0s</div>
+          </div>
+
+          <div id="mode-tag"><svg class="ico"><use href="#sym-primary" /></svg><span>Element Mode</span><em>Tab</em></div>
+        </div>
+
+        <div id="damage-arrows"></div>
+        <div id="status-strip"></div>
+        <div id="passive-tag" class="hidden"></div>
+        <div id="prompt" class="hidden"><b>E</b><span>Cleanse the shrine</span></div>
+        <div id="tutorial" class="panel hidden">
+          <div class="tut-head"><span id="tut-title">Tutorial</span><button id="tut-dismiss" type="button">Dismiss</button></div>
+          <div id="tut-body"></div>
+        </div>
+      </div>
+
+      <!-- ============ Title ============ -->
+      <section id="screen-title" class="screen">
+        <div class="title-wrap">
+          <h1 class="game-title"><span>Elemental</span><em>Frontier</em></h1>
+          <p class="tagline">Four shrines lie blighted across the Sundered Verdance. Take the power the world gives you, reshape the ground beneath your feet, and cleanse them.</p>
+          <div id="continue-card" class="panel continue-card hidden">
+            <div class="cc-row"><span>World seed</span><b id="cc-seed">—</b></div>
+            <div class="cc-row"><span>Affinity</span><b id="cc-affinity">—</b></div>
+            <div class="cc-row"><span>World mode</span><b id="cc-mode">Normal</b></div>
+            <div class="cc-row"><span>Shrines</span><b id="cc-shrines">0 / 4</b></div>
+            <div class="cc-row"><span>Last played</span><b id="cc-time">—</b></div>
+          </div>
+          <div class="menu">
+            <button id="btn-continue" class="btn btn-primary hidden" type="button">Continue</button>
+            <button id="btn-new" class="btn" type="button">New World</button>
+            <button id="btn-settings" class="btn" type="button">Settings</button>
+            <button id="btn-delete" class="btn btn-quiet hidden" type="button">Delete Save</button>
+          </div>
+          <p class="hint">Runs fully offline &middot; progress is stored in your browser&rsquo;s LocalStorage</p>
+        </div>
+      </section>
+
+      <!-- ============ New World ============ -->
+      <section id="screen-newworld" class="screen hidden">
+        <div class="panel newworld-panel">
+          <h2>New World</h2>
+          <p class="newworld-lead">The Verdance chooses your elemental affinity the moment the world is made. Choose only how dangerous it should be.</p>
+          <div class="mode-picker">
+            <button id="btn-mode-normal" class="mode-card selected" type="button">
+              <svg class="ico"><use href="#sym-fire" /></svg>
+              <b>Normal Mode</b>
+              <em>Creatures &amp; guardians</em>
+            </button>
+            <button id="btn-mode-peaceful" class="mode-card" type="button">
+              <svg class="ico"><use href="#sym-peaceful" /></svg>
+              <b>Peaceful Mode</b>
+              <em>No hostile creatures</em>
+            </button>
+          </div>
+          <p id="newworld-desc" class="newworld-desc"></p>
+          <div class="menu menu-row">
+            <button id="btn-newworld-back" class="btn btn-quiet" type="button">Back</button>
+            <button id="btn-newworld-start" class="btn btn-primary" type="button">Create world</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ Settings ============ -->
+      <section id="screen-settings" class="screen hidden">
+        <div class="panel settings-panel">
+          <h2>Settings</h2>
+
+          <div class="settings-group">Graphics quality</div>
+          <div class="quality-picker">
+            <button id="btn-quality-low" class="quality-card" type="button"><b>Low</b><em>Smoothest</em></button>
+            <button id="btn-quality-medium" class="quality-card selected" type="button"><b>Medium</b><em>Balanced</em></button>
+            <button id="btn-quality-high" class="quality-card" type="button"><b>High</b><em>Best looking</em></button>
+          </div>
+
+          <div class="setting"><label for="set-render">Render distance</label><input id="set-render" type="range" min="4" max="16" step="1" /><output id="out-render"></output></div>
+          <div class="setting"><label for="set-terrain">Terrain detail</label><input id="set-terrain" type="range" min="0.5" max="1.5" step="0.05" /><output id="out-terrain"></output></div>
+          <div class="setting"><label for="set-particles">Particle density</label><input id="set-particles" type="range" min="0.25" max="1.5" step="0.05" /><output id="out-particles"></output></div>
+          <div class="setting"><label for="set-shadowq">Shadow quality</label><input id="set-shadowq" type="range" min="0" max="2" step="1" /><output id="out-shadowq"></output></div>
+          <div class="setting setting-toggle"><label for="set-shadows">Shadows</label><input id="set-shadows" type="checkbox" /></div>
+          <div class="setting setting-toggle"><label for="set-post">Post-processing &amp; bloom</label><input id="set-post" type="checkbox" /></div>
+          <div class="setting setting-toggle"><label for="set-aa">Anti-aliasing</label><input id="set-aa" type="checkbox" /></div>
+
+          <div class="settings-group">Controls &amp; view</div>
+          <div class="setting"><label for="set-sens">Mouse sensitivity</label><input id="set-sens" type="range" min="0.2" max="3" step="0.05" /><output id="out-sens"></output></div>
+          <div class="setting"><label for="set-fov">Field of view</label><input id="set-fov" type="range" min="60" max="110" step="1" /><output id="out-fov"></output></div>
+
+          <div class="settings-group">Audio</div>
+          <div class="setting"><label for="set-master">Master volume</label><input id="set-master" type="range" min="0" max="1" step="0.01" /><output id="out-master"></output></div>
+          <div class="setting"><label for="set-sfx">Effects volume</label><input id="set-sfx" type="range" min="0" max="1" step="0.01" /><output id="out-sfx"></output></div>
+          <div class="setting"><label for="set-amb">Ambience volume</label><input id="set-amb" type="range" min="0" max="1" step="0.01" /><output id="out-amb"></output></div>
+          <div class="setting setting-toggle"><label for="set-mute">Mute all audio</label><input id="set-mute" type="checkbox" /></div>
+
+          <div class="menu menu-row">
+            <button id="btn-settings-reset" class="btn btn-quiet" type="button">Reset defaults</button>
+            <button id="btn-settings-back" class="btn btn-primary" type="button">Back</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ Loading ============ -->
+      <section id="screen-loading" class="screen hidden">
+        <div class="loading-wrap">
+          <div class="loader-ring"><i></i><i></i><i></i><i></i></div>
+          <h2 id="loading-title">Shaping the Verdance</h2>
+          <div class="progress"><div id="loading-fill"></div></div>
+          <p id="loading-note">Carving terrain&hellip;</p>
+        </div>
+      </section>
+
+      <!-- ============ Affinity reveal ============ -->
+      <section id="screen-reveal" class="screen hidden">
+        <div class="reveal-wrap">
+          <p class="reveal-kicker">The Verdance has chosen for you</p>
+          <div class="reveal-sigil"><svg id="reveal-icon" class="ico"><use href="#sym-air" /></svg></div>
+          <h2 id="reveal-name">Affinity</h2>
+          <div id="reveal-mode" class="mode-badge">Normal world</div>
+          <p id="reveal-desc" class="reveal-desc"></p>
+          <ul id="reveal-abilities" class="reveal-abilities"></ul>
+          <button id="btn-reveal-continue" class="btn btn-primary" type="button">Enter the world</button>
+        </div>
+        <canvas id="reveal-canvas"></canvas>
+      </section>
+
+      <!-- ============ Pause ============ -->
+      <section id="screen-pause" class="screen hidden">
+        <div class="panel pause-panel">
+          <h2>Paused</h2>
+          <div class="cc-row"><span>World seed</span><b id="pause-seed">—</b></div>
+          <div class="cc-row"><span>Affinity</span><b id="pause-affinity">—</b></div>
+          <div class="cc-row"><span>World mode</span><b id="pause-mode">Normal</b></div>
+          <div class="cc-row"><span>Shrines</span><b id="pause-shrines">0 / 4</b></div>
+          <div class="menu">
+            <button id="btn-resume" class="btn btn-primary" type="button">Resume</button>
+            <button id="btn-pause-mode" class="btn" type="button">Switch to Peaceful Mode</button>
+            <button id="btn-pause-settings" class="btn" type="button">Settings</button>
+            <button id="btn-pause-tutorial" class="btn" type="button">Replay tutorial</button>
+            <button id="btn-pause-title" class="btn btn-quiet" type="button">Save &amp; quit to title</button>
+          </div>
+          <div class="settings-group">Run build</div>
+          <div id="pause-build" class="pause-build"></div>
+          <div class="menu" style="margin-top:0.6rem">
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ Satchel ============ -->
+      <section id="screen-satchel" class="screen hidden">
+        <div class="panel satchel-panel">
+          <h2><svg class="ico"><use href="#sym-satchel" /></svg> Satchel</h2>
+          <div class="satchel-cols">
+            <div>
+              <div class="settings-group">Healing</div>
+              <div id="satchel-items" class="satchel-items"></div>
+            </div>
+            <div>
+              <div class="settings-group">Terrain materials</div>
+              <ul id="satchel-materials" class="satchel-materials"></ul>
+            </div>
+          </div>
+          <div class="menu"><button id="btn-satchel-close" class="btn btn-primary" type="button">Close</button></div>
+        </div>
+      </section>
+
+      <!-- ============ Death ============ -->
+      <section id="screen-death" class="screen hidden">
+        <div class="panel death-panel">
+          <h2>You fall</h2>
+          <p id="death-note">The blight takes its due.</p>
+          <div class="menu"><button id="btn-respawn" class="btn btn-primary" type="button">Respawn</button></div>
+        </div>
+      </section>
+
+      <!-- ============ Upgrade card ============ -->
+      <section id="screen-upgrade" class="screen hidden">
+        <div class="panel upgrade-panel">
+          <p class="reveal-kicker">Shrine cleansed</p>
+          <div class="upgrade-sigil"><svg id="upgrade-icon" class="ico"><use href="#sym-shrine" /></svg></div>
+          <h2 id="upgrade-title">Blessing of the Shrine</h2>
+          <ul id="upgrade-list"></ul>
+          <button id="btn-upgrade-continue" class="btn btn-primary" type="button">Continue</button>
+        </div>
+      </section>
+
+      <!-- ============ Victory ============ -->
+      <section id="screen-victory" class="screen hidden">
+        <div class="victory-wrap">
+          <p class="reveal-kicker">All four shrines burn clean</p>
+          <h2 class="game-title"><span>The Verdance</span><em>Mends</em></h2>
+          <p id="victory-desc" class="reveal-desc"></p>
+          <div id="victory-stats" class="victory-stats"></div>
+          <div class="menu menu-row">
+            <button id="btn-victory-continue" class="btn btn-primary" type="button">Keep exploring</button>
+            <button id="btn-victory-new" class="btn" type="button">New World</button>
+          </div>
+        </div>
+        <canvas id="victory-canvas"></canvas>
+      </section>
+
+      <!-- ============ Confirm dialog ============ -->
+      <section id="screen-confirm" class="screen hidden">
+        <div class="panel confirm-panel">
+          <h2 id="confirm-title">Are you sure?</h2>
+          <p id="confirm-body"></p>
+          <div class="menu menu-row">
+            <button id="btn-confirm-no" class="btn btn-quiet" type="button">Cancel</button>
+            <button id="btn-confirm-yes" class="btn btn-danger" type="button">Confirm</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ Reward selection ============ -->
+      <section id="screen-reward" class="screen hidden">
+        <div class="reward-wrap">
+          <p class="reveal-kicker">The blight yields something</p>
+          <h2 class="reward-title">Choose one</h2>
+          <div id="reward-cards" class="reward-cards"></div>
+          <div id="reward-synergies" class="reward-synergies"></div>
+          <button id="btn-reward-skip" class="btn btn-quiet" type="button">Take nothing</button>
+        </div>
+      </section>
+
+      <!-- Toasts sit above every screen so menu warnings are visible too. -->
+      <div id="toasts"></div>
+
+      <div id="fps" class="hidden"></div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

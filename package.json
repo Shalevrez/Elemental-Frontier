@@ -1,0 +1,24 @@
+{
+  "name": "elemental-frontier",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Elemental Frontier - a first-person voxel sandbox adventure of shrines, storms and stone.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.180.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.11",
+    "vitest": "^3.0.5"
+  }
+}
