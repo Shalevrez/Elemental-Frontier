@@ -229,6 +229,28 @@ export class Enemy {
     this.barTimer = Math.max(this.barTimer, seconds);
   }
 
+  /** How hard this creature is to move. Light ones are dragged by wind. */
+  get knockbackResist(): number {
+    return this.type.knockbackResist;
+  }
+
+  /**
+   * Cancel an attack that is still winding up.
+   *
+   * Control abilities - Tidal Pull, a stun, a heavy stagger - use this so
+   * interrupting a telegraphed swing is a real, visible outcome rather than
+   * merely delaying it. Returns true when something was actually interrupted.
+   */
+  interrupt(): boolean {
+    if (this.state !== 'telegraph') return false;
+    this.telegraphTimer = 0;
+    this.telegraphTotal = 0;
+    this.pendingAttack = -1;
+    this.state = 'hurt';
+    this.stateTime = 0;
+    return true;
+  }
+
   damage(amount: number, element: ElementId | null, knockback: THREE.Vector3 | null, stagger = 0): number {
     if (!this.alive || this.state === 'dead') return 0;
     const mult = this.resistanceTo(element);

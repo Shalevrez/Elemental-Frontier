@@ -39,17 +39,67 @@ function borderDistance(x: number, z: number): number {
   return Math.min(x, z, WORLD_SIZE - x, WORLD_SIZE - z);
 }
 
+/**
+ * The shape controls a world definition supplies.
+ *
+ * The defaults reproduce the original Verdant terrain exactly, so a world that
+ * does not override anything generates byte-for-byte what it always did.
+ */
+export interface TerrainShape {
+  baseHeight: number;
+  amplitude: number;
+  detail: number;
+  ridge: number;
+  basinDepth: number;
+  basinThreshold: number;
+  caves: number;
+  warp: number;
+  rim: number;
+  /** 0 keeps one landmass; higher values break the surface into islands. */
+  islands: number;
+  /** Height of this world's water or lava surface. */
+  fluidLevel: number;
+}
+
+export const DEFAULT_SHAPE: Readonly<TerrainShape> = Object.freeze({
+  baseHeight: 26,
+  amplitude: 8.5,
+  detail: 2.2,
+  ridge: 12,
+  basinDepth: 24,
+  basinThreshold: 0.44,
+  caves: 1,
+  warp: 5.4,
+  rim: 20,
+  islands: 0,
+  fluidLevel: SEA_LEVEL,
+});
+
+function shapeOf(shape?: Partial<TerrainShape>): TerrainShape {
+  return shape ? { ...DEFAULT_SHAPE, ...shape } : (DEFAULT_SHAPE as TerrainShape);
+}
+
 /** Natural rolling surface height for a column, before shrines and the plaza. */
-export function naturalHeight(x: number, z: number, seed: number): number {
+export function naturalHeight(x: number, z: number, seed: number, shape?: Partial<TerrainShape>): number {
+  const s = shapeOf(shape);
   const base = fbm2(x * 0.0088, z * 0.0088, seed, 4) * 2 - 1;
   const detail = fbm2(x * 0.038, z * 0.038, seed + 991, 3) * 2 - 1;
   const ridge = ridged2(x * 0.0118, z * 0.0118, seed + 4409, 3);
   const continent = smoothstep(-0.18, 0.5, base);
 
-  let h = 26 + base * 8.5 + detail * 2.2 + ridge * ridge * 12 * continent;
+  let h = s.baseHeight + base * s.amplitude + detail * s.detail + ridge * ridge * s.ridge * continent;
 
   const basin = fbm2(x * 0.0058 + 40, z * 0.0058 - 22, seed + 7717, 3);
-  if (basin < 0.44) h -= (0.44 - basin) * 24;
+  if (basin < s.basinThreshold) h -= (s.basinThreshold - basin) * s.basinDepth;
+
+  // Island worlds cut deep channels between raised land masses, so the water
+  // between them is genuine open sea rather than a puddle.
+  if (s.islands > 0) {
+    const archipelago = fbm2(x * 0.0135 - 310, z * 0.0135 + 118, seed + 15511, 4) * 2 - 1;
+    const shelf = smoothstep(-0.05, 0.42, archipelago);
+    h -= (1 - shelf) * 16 * s.islands;
+    h += shelf * shelf * 9 * s.islands;
+  }
 
   // Rolling coastal cliffs enclose the world instead of a hard wall.
   const bd = borderDistance(x, z);
@@ -57,42 +107,48 @@ export function naturalHeight(x: number, z: number, seed: number): number {
     const t = (36 - bd) / 36;
     const crags = ridged2(x * 0.03, z * 0.03, seed + 1319, 3);
     const lumps = fbm2(x * 0.016, z * 0.016, seed + 2411, 3) * 2 - 1;
-    h += t * t * (20 + crags * 20 + lumps * 7);
+    h += t * t * (s.rim + crags * 20 + lumps * 7);
   }
 
   return clamp(h, 3, WORLD_HEIGHT - 5);
 }
 
 /** Height after shrine plateaus and the central plaza are blended in. */
-export function terrainHeight(x: number, z: number, seed: number): number {
-  let h = naturalHeight(x, z, seed);
+export function terrainHeight(x: number, z: number, seed: number, shape?: Partial<TerrainShape>): number {
+  let h = naturalHeight(x, z, seed, shape);
 
   for (const site of SHRINE_SITES) {
     const d = Math.hypot(x - site.x, z - site.z);
     if (d < SHRINE_FIELD_RADIUS) {
-      const plateau = shrinePlateauHeight(site.index, seed);
+      const plateau = shrinePlateauHeight(site.index, seed, shape);
       h = plateau + (h - plateau) * smoothstep(10, SHRINE_FIELD_RADIUS, d);
     }
   }
 
   const dc = Math.hypot(x - WORLD_CENTER, z - WORLD_CENTER);
   if (dc < SPAWN_PLAZA_RADIUS + 10) {
-    const plaza = spawnPlazaHeight(seed);
+    const plaza = spawnPlazaHeight(seed, shape);
     h = plaza + (h - plaza) * smoothstep(SPAWN_PLAZA_RADIUS - 2, SPAWN_PLAZA_RADIUS + 10, dc);
   }
 
   return clamp(h, 2, WORLD_HEIGHT - 5);
 }
 
-export function shrinePlateauHeight(index: number, seed: number): number {
+/**
+ * Shrine plateaus and the spawn plaza always sit above this world's fluid line,
+ * so a flooded or lava-filled world never drowns its own objectives.
+ */
+export function shrinePlateauHeight(index: number, seed: number, shape?: Partial<TerrainShape>): number {
+  const s = shapeOf(shape);
   const site = SHRINE_SITES[index]!;
-  const raw = naturalHeight(site.x, site.z, seed);
-  return clamp(Math.round(raw), SEA_LEVEL + 3, WORLD_HEIGHT - 22);
+  const raw = naturalHeight(site.x, site.z, seed, shape);
+  return clamp(Math.round(raw), s.fluidLevel + 3, WORLD_HEIGHT - 22);
 }
 
-export function spawnPlazaHeight(seed: number): number {
-  const raw = naturalHeight(WORLD_CENTER, WORLD_CENTER, seed);
-  return clamp(Math.round(raw), SEA_LEVEL + 2, 40);
+export function spawnPlazaHeight(seed: number, shape?: Partial<TerrainShape>): number {
+  const s = shapeOf(shape);
+  const raw = naturalHeight(WORLD_CENTER, WORLD_CENTER, seed, shape);
+  return clamp(Math.round(raw), s.fluidLevel + 2, Math.max(40, s.fluidLevel + 8));
 }
 
 export function temperatureAt(x: number, z: number, seed: number): number {
@@ -121,14 +177,32 @@ export function blightAt(x: number, z: number, seed: number, cleansed: readonly 
  * Distance from the shrine's protected core, used to refuse terrain edits and
  * to keep the sculpted foundations intact.
  */
-export function shrineProtection(x: number, y: number, z: number, seed: number): boolean {
+export function shrineProtection(x: number, y: number, z: number, seed: number, shape?: Partial<TerrainShape>): boolean {
   for (const site of SHRINE_SITES) {
     const d = Math.hypot(x - site.x, z - site.z);
     if (d > 14) continue;
-    const plateau = shrinePlateauHeight(site.index, seed);
+    const plateau = shrinePlateauHeight(site.index, seed, shape);
     if (y > plateau - 6 && y < plateau + 30) return true;
   }
   return false;
+}
+
+/** Material palette a world generates with. Defaults match the Verdant Ruins. */
+export interface TerrainMaterials {
+  surface: number;
+  subsurface: number;
+  deep: number;
+  shore: number;
+  accent: number;
+}
+
+export const DEFAULT_MATERIALS: Readonly<TerrainMaterials> = Object.freeze({
+  surface: Mat.GRASS, subsurface: Mat.SOIL, deep: Mat.STONE, shore: Mat.SAND, accent: Mat.CLAY,
+});
+
+export interface GenerateOptions {
+  shape?: Partial<TerrainShape>;
+  materials?: Partial<TerrainMaterials>;
 }
 
 /**
@@ -140,17 +214,24 @@ export function shrineProtection(x: number, y: number, z: number, seed: number):
 export function* generateFieldSteps(
   seed: number,
   cleansed: readonly boolean[] = [false, false, false, false],
+  options: GenerateOptions = {},
 ): Generator<number, DensityField, void> {
   const density = new Float32Array(DX * DY * DZ);
   const material = new Uint8Array(DX * DY * DZ);
   const heights = new Float32Array(DX * DZ);
+
+  const s = shapeOf(options.shape);
+  const mats: TerrainMaterials = options.materials
+    ? { ...DEFAULT_MATERIALS, ...options.materials }
+    : (DEFAULT_MATERIALS as TerrainMaterials);
+  const fluid = s.fluidLevel;
 
   const SLICE = 8;
   for (let x0 = 0; x0 < DX; x0 += SLICE) {
     const xEnd = Math.min(DX, x0 + SLICE);
     for (let x = x0; x < xEnd; x++) {
       for (let z = 0; z < DZ; z++) {
-        const h = terrainHeight(x, z, seed);
+        const h = terrainHeight(x, z, seed, options.shape);
         heights[x * DZ + z] = h;
 
         const temp = temperatureAt(x, z, seed);
@@ -167,15 +248,15 @@ export function* generateFieldSteps(
           if (d > -9 && d < 9) {
             const warp = valueNoise3(x * 0.055, y * 0.075, z * 0.055, seed + 8081) - 0.5;
             const warp2 = valueNoise3(x * 0.14, y * 0.17, z * 0.14, seed + 3313) - 0.5;
-            d += warp * 5.4 + warp2 * 1.5;
+            d += warp * s.warp + warp2 * 1.5;
           }
 
           // Caves: smooth tubular voids well below the surface.
-          if (y > 3 && y < h - 5) {
+          if (s.caves > 0 && y > 3 && y < h - 5) {
             const c1 = valueNoise3(x * 0.032, y * 0.05, z * 0.032, seed + 6163);
             const c2 = valueNoise3(x * 0.021 + 12, y * 0.036, z * 0.021 - 8, seed + 9421);
             const tube = 1 - Math.abs(c1 - 0.5) * 4 - Math.abs(c2 - 0.5) * 3.2;
-            if (tube > 0) d -= tube * 9;
+            if (tube > 0) d -= tube * 9 * s.caves;
           }
 
           const dd = clamp(d, -DENSITY_CLAMP, DENSITY_CLAMP);
@@ -189,15 +270,15 @@ export function* generateFieldSteps(
           const depth = h - y;
           if (blight > 0.45 && depth < 4) m = Mat.CORRUPT;
           else if (depth < 1.4) {
-            if (h <= SEA_LEVEL + 1.5) m = Mat.SAND;
+            if (h <= fluid + 1.5) m = mats.shore as MaterialId;
             else if (desert) m = Mat.SAND;
-            else m = Mat.GRASS;
+            else m = mats.surface as MaterialId;
           } else if (depth < 4.5) {
-            m = desert ? Mat.SAND : h <= SEA_LEVEL + 2 ? Mat.SAND : Mat.SOIL;
+            m = desert ? Mat.SAND : h <= fluid + 2 ? (mats.shore as MaterialId) : (mats.subsurface as MaterialId);
           } else if (depth < 8 && moist > 0.58) {
-            m = Mat.CLAY;
+            m = mats.accent as MaterialId;
           } else {
-            m = Mat.STONE;
+            m = mats.deep as MaterialId;
           }
           material[base + y] = m;
         }
@@ -209,8 +290,12 @@ export function* generateFieldSteps(
   return { density, material, heights, seed };
 }
 
-export function generateField(seed: number, cleansed: readonly boolean[] = [false, false, false, false]): DensityField {
-  const it = generateFieldSteps(seed, cleansed);
+export function generateField(
+  seed: number,
+  cleansed: readonly boolean[] = [false, false, false, false],
+  options: GenerateOptions = {},
+): DensityField {
+  const it = generateFieldSteps(seed, cleansed, options);
   let step = it.next();
   while (!step.done) step = it.next();
   return step.value;

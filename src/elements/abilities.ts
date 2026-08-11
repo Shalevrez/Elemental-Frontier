@@ -10,7 +10,7 @@
 
 import * as THREE from 'three';
 import type { ElementId } from './affinity';
-import { ELEMENTS } from './elements';
+import { ELEMENTS, abilitiesOf, abilityForSlot } from './elements';
 import type { Player } from '../player/Player';
 import type { World } from '../world/World';
 import type { EnemyManager, Enemy } from '../combat/Enemies';
@@ -19,6 +19,9 @@ import type { Particles } from '../fx/Particles';
 import type { Decals } from '../fx/Decals';
 import type { AudioEngine } from '../audio/AudioEngine';
 import type { BuildState } from '../progression/BuildState';
+import type { StatModifiers } from '../progression/upgrades';
+import type { TerrainEffects } from '../world/deformation';
+import type { ChargeSource } from '../progression/ultimate';
 import { durationModifier, resolveReaction, type ReactionElement, type StatusId } from '../combat/status';
 import { Mat } from '../world/materials';
 import { abilityCombat, STATUS_TUNING } from '../combat/combatConfig';
@@ -47,7 +50,8 @@ const RESIST_THRESHOLD = 0.85;
 /** Below this it is effectively immune and the player should be told plainly. */
 const IMMUNE_THRESHOLD = 0.2;
 
-export type AbilitySlot = 'primary' | 'secondary';
+/** Slots that spend Mana. The Ultimate spends the Ultimate meter instead. */
+export type AbilitySlot = 'primary' | 'secondary' | 'technique';
 export type UseResult = 'ok' | 'cooldown' | 'energy' | 'blocked';
 
 export interface AbilityContext {
@@ -59,6 +63,21 @@ export interface AbilityContext {
   decals: Decals;
   audio: AudioEngine;
   build: BuildState;
+  /**
+   * Aggregated stat modifiers: the permanent build combined with whatever
+   * timed blessings are running. Falls back to the build alone when absent.
+   */
+  modifiers?(): Readonly<StatModifiers>;
+  /** Behaviour-grant lookup across the build and any timed blessings. */
+  grant?(tag: string): number;
+  /** Ground effects created by combat - burning ground, ice, steam, smoke. */
+  effects?: TerrainEffects;
+  /** Feed the Ultimate meter. */
+  charge?(source: ChargeSource, magnitude?: number): void;
+  /** Register a hit for the Ultimate combo counter. */
+  comboHit?(): void;
+  /** Return Mana to the player, e.g. from a terrain-ability refund. */
+  refundMana?(amount: number): void;
   /** Damage multiplier from the affinity itself (focused builds hit harder). */
   affinityBonus(): number;
   flash(color: number, strength: number): void;
@@ -109,6 +128,18 @@ export class AbilitySystem {
   /** Pending delayed casts, used by `gust-double` and `whip-return`. */
   private delayed: { at: number; run: () => void }[] = [];
   private clock = 0;
+  /** Power multiplier for the cast in flight (a weakened fallback primary). */
+  private castPower = 1;
+  /** Mana charged for the last successful cast. */
+  private lastCost = 0;
+
+  /**
+   * Sustained Ultimate fields: Maelstrom, Inferno and Cyclone all persist for a
+   * few seconds, damaging and controlling on a fixed interval rather than in a
+   * single frame. They are advanced by `update`, so they keep running while the
+   * player moves and fights.
+   */
+  private fields: UltimateField[] = [];
 
   /** The Water Whip stream while it is being held out. */
   private stream: {
@@ -136,15 +167,38 @@ export class AbilitySystem {
       },
     };
     for (const el of Object.values(ELEMENTS)) {
-      this.cooldowns.set(el.primary.id, createCooldown());
-      this.cooldowns.set(el.secondary.id, createCooldown());
+      for (const ability of abilitiesOf(el.id)) {
+        this.cooldowns.set(ability.id, createCooldown());
+      }
     }
+  }
+
+  // -------------------------------------------------- modifier accessors
+
+  /** Build modifiers combined with any timed blessings. */
+  private get mods(): Readonly<StatModifiers> {
+    return this.ctx.modifiers?.() ?? this.ctx.build.modifiers;
+  }
+
+  /** Total stacks of a behaviour grant, across the build and active buffs. */
+  private g(tag: string): number {
+    return this.ctx.grant?.(tag) ?? this.ctx.build.grant(tag);
+  }
+
+  private hasG(tag: string): boolean {
+    return this.g(tag) > 0;
+  }
+
+  /** Feed the Ultimate meter, when the game wired one up. */
+  private charge(source: ChargeSource, magnitude = 1): void {
+    this.ctx.charge?.(source, magnitude);
   }
 
   update(dt: number): void {
     this.clock += dt;
     for (const cd of this.cooldowns.values()) tickCooldown(cd, dt);
     if (this.stream) this.tickStream(dt);
+    if (this.fields.length > 0) this.tickFields(dt);
 
     if (this.rampageTimer > 0) {
       this.rampageTimer -= dt;
@@ -169,6 +223,7 @@ export class AbilitySystem {
     this.rampageTimer = 0;
     this.delayed.length = 0;
     this.stream = null;
+    this.fields.length = 0;
     this.ticks.clear();
   }
 
@@ -280,64 +335,107 @@ export class AbilitySystem {
   // ------------------------------------------------------------- queries
 
   fraction(element: ElementId, slot: AbilitySlot): number {
-    const def = slot === 'primary' ? ELEMENTS[element].primary : ELEMENTS[element].secondary;
-    const cd = this.cooldowns.get(def.id);
+    const cd = this.cooldowns.get(abilityForSlot(element, slot).id);
     return cd ? cooldownFraction(cd) : 0;
   }
 
+  /** Seconds of cooldown left, for the HUD readout. */
+  remaining(element: ElementId, slot: AbilitySlot): number {
+    const cd = this.cooldowns.get(abilityForSlot(element, slot).id);
+    return cd ? Math.max(0, cd.remaining) : 0;
+  }
+
   ready(element: ElementId, slot: AbilitySlot): boolean {
-    const def = slot === 'primary' ? ELEMENTS[element].primary : ELEMENTS[element].secondary;
-    const cd = this.cooldowns.get(def.id);
+    const cd = this.cooldowns.get(abilityForSlot(element, slot).id);
     return cd ? isReady(cd) : true;
   }
 
   costOf(element: ElementId, slot: AbilitySlot): number {
-    const def = slot === 'primary' ? ELEMENTS[element].primary : ELEMENTS[element].secondary;
-    return def.cost * this.ctx.build.modifiers.costScale;
+    return abilityForSlot(element, slot).cost * this.mods.costScale;
   }
 
   affordable(element: ElementId, slot: AbilitySlot): boolean {
     return this.ctx.player.energy >= this.costOf(element, slot);
   }
 
-  use(element: ElementId, slot: AbilitySlot): UseResult {
-    const el = ELEMENTS[element];
-    const def = slot === 'primary' ? el.primary : el.secondary;
+  /**
+   * Fire an ability.
+   *
+   * `costOverride` lets the Mana system charge a reduced fallback price for a
+   * weakened primary, and `powerScale` weakens the cast to match, so a player
+   * who is nearly out of Mana still has something to do.
+   */
+  use(element: ElementId, slot: AbilitySlot, costOverride?: number, powerScale = 1): UseResult {
+    const def = abilityForSlot(element, slot);
     const cd = this.cooldowns.get(def.id)!;
     if (!isReady(cd)) return 'cooldown';
-    const cost = this.costOf(element, slot);
+    const cost = costOverride ?? this.costOf(element, slot);
     if (this.ctx.player.energy < cost) return 'energy';
 
+    this.castPower = powerScale;
     const result = this.cast(def.id);
+    this.castPower = 1;
     if (result !== 'ok') return result;
 
     this.ctx.player.spend(cost);
+    this.lastCost = cost;
 
     // Rampage: repeated fire hits shorten the next cooldown.
     const speed = 1 - Math.min(0.4, this.rampage * 0.08);
     const scale = this.ctx.player.stats.cooldownScale
-      * this.ctx.build.modifiers.cooldownScale
+      * this.mods.cooldownScale
       * speed;
     startCooldown(cd, effectiveCooldown(def.cooldown, scale));
 
     // `echo-cast`: a chance to fire the same ability again for free.
-    const echo = this.ctx.build.grant('echo-cast');
+    const echo = this.g('echo-cast');
     if (echo > 0 && Math.random() < 0.18 * echo) {
       this.later(0.12, () => { this.cast(def.id); });
     }
     return 'ok';
   }
 
+  /** Mana actually charged for the last successful cast. */
+  get lastCastCost(): number {
+    return this.lastCost;
+  }
+
+  /**
+   * Fire the element's Ultimate.
+   *
+   * The caller is responsible for the meter: this only refuses when the
+   * ability itself cannot run (no ground under a Tectonic Rupture, say).
+   */
+  useUltimate(element: ElementId): UseResult {
+    const def = ELEMENTS[element].ultimate;
+    switch (def.id) {
+      case 'maelstrom': return this.maelstrom();
+      case 'inferno': return this.inferno();
+      case 'tectonic-rupture': return this.tectonicRupture();
+      case 'cyclone': return this.cyclone();
+      default: return 'blocked';
+    }
+  }
+
+  /** True while an Ultimate field is still running. */
+  get ultimateActive(): boolean {
+    return this.fields.length > 0;
+  }
+
   private cast(id: string): UseResult {
     switch (id) {
       case 'gust': this.gust(); return 'ok';
       case 'air-dash': return this.airDash();
+      case 'air-blades': this.airBlades(); return 'ok';
       case 'water-whip': this.waterWhip(); return 'ok';
       case 'freeze': this.freeze(); return 'ok';
+      case 'tidal-pull': this.tidalPull(); return 'ok';
       case 'rock-shot': this.rockShot(); return 'ok';
       case 'raise-wall': return this.raiseWall();
+      case 'seismic-slam': return this.seismicSlam();
       case 'fireball': this.fireball(); return 'ok';
       case 'flame-wave': this.flameWave(); return 'ok';
+      case 'flame-dash': this.flameDash(); return 'ok';
       default: return 'blocked';
     }
   }
@@ -347,7 +445,7 @@ export class AbilitySystem {
   /** Element-specific damage after every multiplier. */
   private power(base: number, element: ElementId): number {
     const p = this.ctx.player;
-    const m = this.ctx.build.modifiers;
+    const m = this.mods;
     const perElement = element === 'fire' ? m.fireScale
       : element === 'water' ? m.waterScale
         : element === 'earth' ? m.earthScale : m.airScale;
@@ -357,23 +455,24 @@ export class AbilitySystem {
       * p.firePassiveMultiplier()
       * m.damageScale
       * perElement
+      * this.castPower
       * this.ctx.affinityBonus();
 
     // `last-stand`: fire builds get fiercer as health drops.
-    if (element === 'fire' && this.ctx.build.hasGrant('last-stand')) {
+    if (element === 'fire' && this.hasG('last-stand')) {
       const frac = p.maxHealth > 0 ? p.health / p.maxHealth : 1;
       if (frac < 0.5) value *= 1 + (0.5 - frac) * 1.2;
     }
     // `speed-damage`: air scales with how fast the player is moving.
-    if (element === 'air' && this.ctx.build.hasGrant('speed-damage')) {
+    if (element === 'air' && this.hasG('speed-damage')) {
       const speed = Math.hypot(p.velocity.x, p.velocity.z);
-      value *= 1 + Math.min(0.6, speed / 18) * this.ctx.build.grant('speed-damage');
+      value *= 1 + Math.min(0.6, speed / 18) * this.g('speed-damage');
     }
     return value;
   }
 
   private rollCrit(): boolean {
-    const chance = this.ctx.build.modifiers.critChance;
+    const chance = this.mods.critChance;
     return chance > 0 && Math.random() < chance;
   }
 
@@ -393,12 +492,14 @@ export class AbilitySystem {
     stagger = 0,
     status?: { id: StatusId; seconds: number; magnitude?: number },
   ): number {
-    const m = this.ctx.build.modifiers;
+    const m = this.mods;
     const crit = this.rollCrit();
-    let value = amount * (crit ? m.critScale : 1);
+    // Executioner-style tradeoffs cut the damage of a *normal* hit only, so a
+    // crit build keeps its ceiling while its floor drops.
+    let value = amount * (crit ? m.critScale : m.normalHitScale);
 
     // `deep-current`: wet targets are far more fragile.
-    if (this.ctx.build.hasGrant('deep-current') && e.status.has('wet')) value *= 1.35;
+    if (this.hasG('deep-current') && e.status.has('wet')) value *= 1.35;
 
     // Elemental reaction, if the target already carries a matching status.
     const reaction = resolveReaction(element as ReactionElement, e.status);
@@ -429,17 +530,28 @@ export class AbilitySystem {
     // Status the attack itself applies.
     if (status) {
       const seconds = status.seconds * m.statusDuration * durationModifier(status.id, e.status);
-      e.status.apply(status.id, seconds, status.magnitude ?? 0);
+      e.status.apply(status.id, seconds, (status.magnitude ?? 0) * m.statusPower);
+      this.charge('status-applied');
+    }
+
+    // ---- Ultimate charge and Mana economy, fed only by real combat.
+    this.charge('damage-dealt', dealt);
+    this.ctx.comboHit?.();
+    this.charge('combo');
+    if (m.manaOnHit > 0) this.ctx.refundMana?.(m.manaOnHit);
+    if (wasAlive && !e.alive) {
+      this.charge('enemy-defeated');
+      if (m.manaOnKill > 0) this.ctx.refundMana?.(m.manaOnKill);
     }
 
     // `rampage`: fire hits stack attack speed briefly.
-    if (element === 'fire' && this.ctx.build.hasGrant('rampage')) {
+    if (element === 'fire' && this.hasG('rampage')) {
       this.rampage = Math.min(5, this.rampage + 1);
       this.rampageTimer = 3;
     }
 
     // `crit-spread`: crits smear Burning onto the neighbours.
-    if (crit && this.ctx.build.hasGrant('crit-spread')) {
+    if (crit && this.hasG('crit-spread')) {
       for (const other of this.ctx.enemies.within(e.center, 6, _scratch2)) {
         if (other === e) continue;
         other.status.apply('burning', 3 * m.statusDuration, dealt * 0.12);
@@ -447,8 +559,8 @@ export class AbilitySystem {
     }
 
     // `bounce`: water attacks leap onward.
-    if (element === 'water' && this.ctx.build.hasGrant('bounce') && !kb) {
-      const hops = this.ctx.build.grant('bounce');
+    if (element === 'water' && this.hasG('bounce') && !kb) {
+      const hops = this.g('bounce');
       let hopped = 0;
       for (const other of this.ctx.enemies.within(e.center, 7, _scratch2)) {
         if (other === e || hopped >= hops) continue;
@@ -458,7 +570,7 @@ export class AbilitySystem {
     }
 
     // `wall-slam-stun`: enemies driven into terrain are stunned and hurt.
-    if (kb && this.ctx.build.hasGrant('wall-slam-stun')) {
+    if (kb && this.hasG('wall-slam-stun')) {
       _to.copy(e.pos).addScaledVector(kb, 0.12);
       if (this.ctx.world.isSolid(_to.x, _to.y + 0.8, _to.z)) {
         e.status.apply('stunned', 1.2 * m.statusDuration);
@@ -524,7 +636,7 @@ export class AbilitySystem {
           color: 0xbfe8ff, color2: 0xffffff, size: 0.24, life: 1, gravity: -12, drag: 0.5,
         });
         // `shatter-nova`: breaking ice hurts everything nearby.
-        const nova = this.ctx.build.grant('shatter-nova');
+        const nova = this.g('shatter-nova');
         if (nova > 0) {
           for (const other of this.ctx.enemies.within(c, 5 + nova, _scratch2)) {
             if (other === e) continue;
@@ -550,13 +662,13 @@ export class AbilitySystem {
   private gust(): void {
     this.gustBurst();
     // `gust-double`: a second clap follows a beat later.
-    if (this.ctx.build.grant('gust-double') > 0) this.later(0.22, () => this.gustBurst(0.7));
+    if (this.g('gust-double') > 0) this.later(0.22, () => this.gustBurst(0.7));
   }
 
   private gustBurst(scale = 1): void {
-    const { player, enemies, particles, projectiles, audio, build } = this.ctx;
+    const { player, enemies, particles, projectiles, audio } = this.ctx;
     const cfg = abilityCombat('gust');
-    const tempest = build.hasGrant('tempest');
+    const tempest = this.hasG('tempest');
     const range = (tempest ? cfg.range * 1.3 : cfg.range) * scale;
     const halfAngle = tempest ? cfg.coneHalfAngle! * 1.3 : cfg.coneHalfAngle!;
     const cosHalf = Math.cos(halfAngle);
@@ -615,7 +727,7 @@ export class AbilitySystem {
     }
     if (struck > 0) audio.play('impact', 60);
 
-    const reflectToSource = build.hasGrant('gust-reflect-source');
+    const reflectToSource = this.hasG('gust-reflect-source');
     const deflected = projectiles.deflect(_origin, _dir, range, cosHalf, 22, reflectToSource);
     if (deflected > 0) {
       this.ctx.toast(`Deflected ${deflected} projectile${deflected === 1 ? '' : 's'}`, 'good');
@@ -629,7 +741,7 @@ export class AbilitySystem {
   }
 
   private airDash(): UseResult {
-    const { player, particles, audio, build, enemies } = this.ctx;
+    const { player, particles, audio, enemies } = this.ctx;
     const cfg = abilityCombat('air-dash');
     if (!player.onGround && !player.airDashAvailable) return 'blocked';
 
@@ -665,7 +777,7 @@ export class AbilitySystem {
 
     // `dash-damage`: sweep a capsule along the dash line rather than testing a
     // single point at the end, so nothing is passed straight through.
-    const shear = build.grant('dash-damage');
+    const shear = this.g('dash-damage');
     if (shear > 0) {
       this.later(0.08, () => {
         _probeA.x = start.x; _probeA.y = start.y + 0.9; _probeA.z = start.z;
@@ -680,7 +792,7 @@ export class AbilitySystem {
       });
     }
 
-    const tornado = build.grant('dash-tornado');
+    const tornado = this.g('dash-tornado');
     if (tornado > 0) {
       const centre = start.clone();
       for (let step = 0; step < 6; step++) {
@@ -726,7 +838,7 @@ export class AbilitySystem {
     // Run the first slice immediately so the very first frame can connect.
     this.tickStream(0);
 
-    if (this.ctx.build.hasGrant('whip-return')) {
+    if (this.hasG('whip-return')) {
       this.later(cfg.castTime ?? 0.32, () => {
         this.ticks.clear();
         this.stream = {
@@ -851,7 +963,7 @@ export class AbilitySystem {
   }
 
   private freeze(): void {
-    const { world, enemies, particles, audio, decals, build } = this.ctx;
+    const { world, enemies, particles, audio, decals } = this.ctx;
     const cfg = abilityCombat('freeze');
     // Assist is on here: pointing at a creature must place the burst *on* that
     // creature, not at the maximum range behind it.
@@ -896,7 +1008,7 @@ export class AbilitySystem {
       jitter: 3.6, color: 0xbfe8ff, color2: 0xffffff, size: 0.4, life: 0.9, gravity: -2, drag: 1.5,
     });
 
-    const glacier = build.hasGrant('glacier');
+    const glacier = this.hasG('glacier');
     let caught = 0;
     let wetCaught = 0;
     const frozen: Enemy[] = [];
@@ -906,7 +1018,7 @@ export class AbilitySystem {
       const wasWet = e.status.has('wet');
       if (wasWet) wetCaught++;
       const seconds = (wasWet ? STATUS_TUNING.freezeSecondsWhenWet : STATUS_TUNING.freezeSeconds)
-        * (glacier ? 1.7 : 1) * this.ctx.build.modifiers.statusDuration;
+        * (glacier ? 1.7 : 1) * this.mods.statusDuration;
 
       this.damageEnemy(
         e, this.power(cfg.damage, 'water'), 'water', null, cfg.stagger,
@@ -923,7 +1035,7 @@ export class AbilitySystem {
       this.ctx.debug?.({ kind: 'hit', ability: 'freeze', enemyId: e.uid, status: 'frozen' });
     }
 
-    const spread = build.grant('freeze-spread');
+    const spread = this.g('freeze-spread');
     if (spread > 0) {
       for (const e of frozen) {
         for (const other of enemies.within(e.center, 4 + spread, _scratch2)) {
@@ -951,9 +1063,9 @@ export class AbilitySystem {
   // -------------------------------------------------------------- EARTH
 
   private rockShot(): void {
-    const { player, projectiles, particles, audio, build } = this.ctx;
+    const { player, projectiles, particles, audio } = this.ctx;
     const cfg = abilityCombat('rock-shot');
-    const m = build.modifiers;
+    const m = this.mods;
     const solution = this.aim(cfg.range);
     this.castOrigin(_origin);
 
@@ -986,8 +1098,8 @@ export class AbilitySystem {
       blast: (cfg.splash ?? 2) * m.projectileSize,
       life: 3, gravity: 11,
       knockback: cfg.knockback, stagger: cfg.stagger, color: 0x8b7d68,
-      bounces: build.grant('rock-bounce'),
-      fragments: build.grant('rock-fragment'),
+      bounces: this.g('rock-bounce'),
+      fragments: this.g('rock-fragment'),
       element: 'earth',
     });
     this.ctx.debug?.({
@@ -998,7 +1110,7 @@ export class AbilitySystem {
   }
 
   private raiseWall(): UseResult {
-    const { player, world, particles, audio, build } = this.ctx;
+    const { player, world, particles, audio } = this.ctx;
     player.getForward(_fwd);
     const flat = new THREE.Vector3(_fwd.x, 0, _fwd.z);
     if (flat.lengthSq() < 0.0001) flat.set(0, 0, -1);
@@ -1007,7 +1119,7 @@ export class AbilitySystem {
 
     const originX = player.position.x + flat.x * 3.4;
     const originZ = player.position.z + flat.z * 3.4;
-    const tectonic = build.hasGrant('tectonic');
+    const tectonic = this.hasG('tectonic');
     const duration = WALL_SECONDS * (tectonic ? 1.9 : 1);
 
     let placed = 0;
@@ -1054,7 +1166,7 @@ export class AbilitySystem {
     this.ctx.flash(ELEMENTS.earth.color, 0.2);
     this.ctx.hitStop(0.05);
 
-    const armor = build.grant('wall-armor');
+    const armor = this.g('wall-armor');
     if (armor > 0) player.grantArmor(0.12 * armor, 6);
 
     player.unstick();
@@ -1064,9 +1176,9 @@ export class AbilitySystem {
   // --------------------------------------------------------------- FIRE
 
   private fireball(): void {
-    const { player, projectiles, particles, audio, build } = this.ctx;
+    const { player, projectiles, particles, audio } = this.ctx;
     const cfg = abilityCombat('fireball');
-    const m = build.modifiers;
+    const m = this.mods;
     const solution = this.aim(cfg.range);
     this.castOrigin(_origin);
 
@@ -1075,7 +1187,7 @@ export class AbilitySystem {
     player.addShake(0.08, 9);
     this.ctx.pulseLight(_origin.x, _origin.y, _origin.z, 0xff9b3d, 8, 0.16);
 
-    const splits = build.grant('split');
+    const splits = this.g('split');
     const shots = splits > 0 ? 1 + splits * 2 : 1;
     const spread = splits > 0 ? 0.13 : 0;
     _dir.set(solution.direction.x, solution.direction.y, solution.direction.z);
@@ -1111,7 +1223,7 @@ export class AbilitySystem {
   }
 
   private flameWave(): void {
-    const { player, world, enemies, particles, audio, decals, build } = this.ctx;
+    const { player, world, enemies, particles, audio, decals } = this.ctx;
     const cfg = abilityCombat('flame-wave');
     player.getForward(_fwd);
     const flat = new THREE.Vector3(_fwd.x, 0, _fwd.z);
@@ -1124,7 +1236,7 @@ export class AbilitySystem {
     player.addShake(0.34, 5);
     this.ctx.hitStop(0.04);
 
-    const burningGround = build.grant('burning-ground');
+    const burningGround = this.g('burning-ground');
 
     // Visual fan, drawn along the ground.
     const rays = 7;
@@ -1179,9 +1291,611 @@ export class AbilitySystem {
       });
     }
     if (struck > 0) audio.play('impact', 60);
+
+    // Fire changes the ground it sweeps: a burning zone that hurts anything
+    // standing in it, and which water can put out again.
+    const zoneSeconds = 6 + burningGround * 3;
+    this.ctx.effects?.add(
+      'burning',
+      player.position.x + flat.x * 6, world.groundHeight(player.position.x + flat.x * 6, player.position.z + flat.z * 6),
+      player.position.z + flat.z * 6,
+      cfg.radius * 2.2 * this.mods.areaScale, zoneSeconds,
+      this.power(STATUS_TUNING.burnDps * 0.7, 'fire'), 'player',
+    );
+    this.charge('terrain');
+  }
+
+  // =====================================================================
+  //  Techniques (Q)
+  // =====================================================================
+
+  /**
+   * Water · Tidal Pull.
+   *
+   * Drags creatures toward a point, hardest on the ones already soaked, and
+   * interrupts a wind-up in progress so it also answers a telegraphed attack.
+   */
+  private tidalPull(): void {
+    const { enemies, particles, audio, world } = this.ctx;
+    const cfg = abilityCombat('tidal-pull');
+    const radius = cfg.radius * this.mods.areaScale;
+    const solution = this.aim(cfg.range * this.mods.rangeScale);
+    _target.set(solution.target.x, solution.target.y, solution.target.z);
+
+    audio.play('whip', 60);
+    this.ctx.flash(ELEMENTS.water.color, 0.2);
+    this.ctx.pulseLight(_target.x, _target.y, _target.z, ELEMENTS.water.color, 7, 0.4);
+
+    // A visible ring of water pulled inward, so the volume is unmistakable.
+    for (let i = 0; i < 46; i++) {
+      const a = (i / 46) * Math.PI * 2;
+      particles.spark({
+        count: 1,
+        x: _target.x + Math.cos(a) * radius, y: _target.y - 0.2, z: _target.z + Math.sin(a) * radius,
+        vx: -Math.cos(a) * 9, vy: 1.6, vz: -Math.sin(a) * 9, jitter: 1,
+        color: ELEMENTS.water.color, color2: 0xffffff, size: 0.34, life: 0.6, gravity: -2, drag: 1.2,
+      });
+    }
+
+    const strength = 1 + this.g('pull-strength') * 0.35;
+    let pulled = 0;
+    let interrupted = 0;
+    for (const e of enemies.within(_target, radius, _scratch)) {
+      const wet = e.status.has('wet');
+      // Soaked creatures are dragged much harder - the technique rewards the
+      // Water Whip that came before it.
+      _kb.copy(_target).sub(e.center).setY(0);
+      const distance = _kb.length();
+      if (distance > 0.001) _kb.normalize();
+      _kb.multiplyScalar((wet ? 13 : 6) * strength);
+      this.damageEnemy(
+        e, this.power(cfg.damage, 'water') * (wet ? 1.5 : 1), 'water', _kb, cfg.stagger,
+        { id: 'wet', seconds: STATUS_TUNING.wetSeconds },
+      );
+      e.applySlow(0.55, 2.4 * strength);
+      if (e.interrupt?.()) interrupted++;
+      pulled++;
+    }
+
+    // Wet the ground it lands on, which is also what lets Freeze pay off here.
+    const ground = world.groundHeight(_target.x, _target.z);
+    this.ctx.effects?.add('wet', _target.x, ground, _target.z, radius, 10, 0, 'player');
+    this.ctx.decals.add('wet', _target.x, ground + 0.02, _target.z, _up, radius, 9, 0.55);
+    this.charge('terrain');
+
+    this.ctx.toast(
+      pulled > 0
+        ? `Tidal Pull dragged ${pulled} in${interrupted > 0 ? `, interrupting ${interrupted}` : ''}`
+        : 'Tidal Pull found nothing',
+      pulled > 0 ? 'good' : 'warn',
+    );
+  }
+
+  /**
+   * Fire · Flame Dash.
+   *
+   * An aggressive gap-closer: the player lunges inside a lance of fire, burning
+   * everything on the way through and leaving the ground alight behind them.
+   */
+  private flameDash(): void {
+    const { player, particles, audio, enemies, world } = this.ctx;
+    const cfg = abilityCombat('flame-dash');
+    player.getForward(_fwd);
+    const dir = new THREE.Vector3(_fwd.x, 0, _fwd.z);
+    if (dir.lengthSq() < 1e-4) dir.set(0, 0, -1);
+    dir.normalize();
+
+    const start = player.position.clone();
+    player.velocity.x = dir.x * (cfg.speed ?? 30);
+    player.velocity.z = dir.z * (cfg.speed ?? 30);
+    player.velocity.y = Math.max(player.velocity.y, 2.4);
+    player.dashGrace = 1.2;
+    player.addShake(0.24, 8);
+    audio.play('flamewave', 40);
+    this.ctx.flash(ELEMENTS.fire.color, 0.3);
+
+    for (let i = 0; i < 40; i++) {
+      const t = i / 40;
+      particles.spark({
+        count: 1,
+        x: start.x + dir.x * t * cfg.range, y: start.y + 0.9, z: start.z + dir.z * t * cfg.range,
+        vx: dir.x * 4, vy: 2.2, vz: dir.z * 4, jitter: 1.6,
+        color: 0xffb04d, color2: 0xd43f1a, size: 0.4, life: 0.5, gravity: 2.6, drag: 1.4,
+      });
+    }
+
+    // Sweep a capsule along the whole lunge so nothing is passed through.
+    _probeA.x = start.x; _probeA.y = start.y + 0.9; _probeA.z = start.z;
+    _probeB.x = start.x + dir.x * cfg.range;
+    _probeB.y = start.y + 0.9;
+    _probeB.z = start.z + dir.z * cfg.range;
+    const volume = { a: _probeA, b: _probeB, radius: cfg.radius * this.mods.areaScale };
+    let struck = 0;
+    for (const e of enemies.live) {
+      if (!e.alive) continue;
+      if (!capsuleVsCapsule(volume, e.hitCapsule())) continue;
+      _kb.copy(dir).multiplyScalar(this.power(cfg.knockback, 'fire'));
+      this.damageEnemy(
+        e, this.power(cfg.damage, 'fire'), 'fire', _kb, cfg.stagger,
+        { id: 'burning', seconds: STATUS_TUNING.burnSeconds, magnitude: this.power(STATUS_TUNING.burnDps, 'fire') },
+      );
+      struck++;
+    }
+
+    // A burning trail along the lunge line.
+    for (let i = 1; i <= 3; i++) {
+      const t = i / 3;
+      const x = start.x + dir.x * cfg.range * t;
+      const z = start.z + dir.z * cfg.range * t;
+      const ground = world.groundHeight(x, z);
+      this.ctx.effects?.add(
+        'burning', x, ground, z, 2.2 * this.mods.areaScale, 7,
+        this.power(STATUS_TUNING.burnDps * 0.6, 'fire'), 'player',
+      );
+      this.ctx.decals.add('scorch', x, ground + 0.02, z, _up, 2.4, 9, 0.7);
+    }
+    this.charge('terrain');
+    if (struck > 0) audio.play('impact', 60);
+  }
+
+  /**
+   * Earth · Seismic Slam.
+   *
+   * Cracks race away from the player along the ground, damaging and staggering
+   * anything standing on the affected terrain and leaving real craters behind.
+   */
+  private seismicSlam(): UseResult {
+    const { player, world, enemies, particles, audio, decals } = this.ctx;
+    const cfg = abilityCombat('seismic-slam');
+    player.getForward(_fwd);
+    const dir = new THREE.Vector3(_fwd.x, 0, _fwd.z);
+    if (dir.lengthSq() < 1e-4) dir.set(0, 0, -1);
+    dir.normalize();
+
+    const originGround = world.groundHeight(player.position.x, player.position.z);
+    if (originGround <= 0) {
+      this.ctx.toast('No ground to break', 'warn');
+      return 'blocked';
+    }
+
+    audio.play('wall');
+    player.addShake(0.5, 5);
+    this.ctx.hitStop(0.06);
+    this.ctx.flash(ELEMENTS.earth.color, 0.26);
+
+    const width = this.g('slam-wide') > 0 ? 3 : 1;
+    const reach = cfg.range * this.mods.rangeScale;
+    const struck = new Set<number>();
+
+    for (let lane = 0; lane < width; lane++) {
+      const angle = (lane - (width - 1) / 2) * 0.42;
+      const laneDir = dir.clone().applyAxisAngle(_up, angle);
+      for (let step = 1; step <= 7; step++) {
+        const t = step / 7;
+        const x = player.position.x + laneDir.x * reach * t;
+        const z = player.position.z + laneDir.z * reach * t;
+        const ground = world.groundHeight(x, z);
+        if (ground <= 0) break;
+
+        particles.debris({
+          count: 10, x, y: ground + 0.5, z, spread: 0.8, vy: 5.4, jitter: 3,
+          color: 0x8a6440, color2: 0x503a24, size: 0.24, life: 0.9, gravity: -13, drag: 0.7,
+        });
+        world.normalAt(x, ground + 0.2, z, _normal);
+        decals.add('crack', x, ground + 0.02, z, _normal, 2.6, 16, 0.85);
+
+        // A real crack in the terrain, size-limited and never on protected ground.
+        this.ctx.effects?.deform(x, ground - 0.2, z, 1.6 * this.mods.areaScale, -1.5, Mat.SOIL, 22);
+
+        _v.set(x, ground + 0.8, z);
+        for (const e of enemies.within(_v, cfg.radius * this.mods.areaScale, _scratch)) {
+          if (struck.has(e.uid)) continue;
+          struck.add(e.uid);
+          _kb.copy(e.center).sub(_v).setY(0.35).normalize()
+            .multiplyScalar(this.power(cfg.knockback, 'earth'));
+          this.damageEnemy(
+            e, this.power(cfg.damage, 'earth'), 'earth', _kb,
+            cfg.stagger * (1 + this.g('slam-wide') * 0.2),
+            { id: 'stunned', seconds: 0.9 },
+          );
+        }
+      }
+    }
+
+    // Earth's terrain refund: reshaping the ground pays a little Mana back when
+    // it actually connects with something.
+    if (struck.size > 0) this.ctx.refundMana?.(4 + struck.size * 2);
+    this.charge('terrain');
+    this.ctx.toast(
+      struck.size > 0 ? `Seismic Slam staggered ${struck.size}` : 'The ground cracks',
+      struck.size > 0 ? 'good' : 'plain' as 'good',
+    );
+    return 'ok';
+  }
+
+  /**
+   * Air · Air Blades.
+   *
+   * Several fast wind blades. They pierce light creatures outright and bounce
+   * off terrain, so they keep working in a corridor.
+   */
+  private airBlades(): void {
+    const { projectiles, audio, player } = this.ctx;
+    const cfg = abilityCombat('air-blades');
+    const solution = this.aim(cfg.range * this.mods.rangeScale);
+    this.castOrigin(_origin);
+    _dir.set(solution.direction.x, solution.direction.y, solution.direction.z);
+
+    audio.play('gust', 40);
+    this.ctx.flash(ELEMENTS.air.color, 0.16);
+    player.addShake(0.1, 9);
+
+    const blades = 3 + this.g('extra-blade') * 2 + this.g('extra-projectile');
+    const spread = 0.1;
+    for (let i = 0; i < blades; i++) {
+      const offset = blades === 1 ? 0 : (i - (blades - 1) / 2) * spread;
+      const dir = _dir.clone().applyAxisAngle(_up, offset);
+      projectiles.spawn({
+        kind: 'bolt', owner: 'player',
+        origin: _origin.clone(),
+        direction: dir,
+        speed: (cfg.speed ?? 44) * this.mods.projectileSpeed,
+        damage: this.power(cfg.damage, 'air'),
+        radius: cfg.radius * this.mods.projectileSize,
+        blast: 0.9 * this.mods.areaScale,
+        life: 1.6, gravity: 0,
+        knockback: cfg.knockback, stagger: cfg.stagger,
+        color: ELEMENTS.air.color,
+        bounces: 1 + this.g('extra-blade'),
+        element: 'air',
+      });
+    }
+    this.ctx.debug?.({
+      kind: 'aim', ability: 'air-blades',
+      origin: { x: _origin.x, y: _origin.y, z: _origin.z },
+      target: solution.target, radius: cfg.radius,
+    });
+  }
+
+  // =====================================================================
+  //  Ultimates (middle mouse / R)
+  // =====================================================================
+
+  /** Advance every sustained Ultimate field. */
+  private tickFields(dt: number): void {
+    for (let i = this.fields.length - 1; i >= 0; i--) {
+      const field = this.fields[i]!;
+      field.elapsed += dt;
+      if (field.elapsed >= field.duration) {
+        this.fields.splice(i, 1);
+        continue;
+      }
+      // A travelling field (Cyclone) walks forward on its own.
+      if (field.speed > 0) {
+        field.x += field.dirX * field.speed * dt;
+        field.z += field.dirZ * field.speed * dt;
+        field.y = this.ctx.world.groundHeight(field.x, field.z);
+      }
+      field.sinceTick += dt;
+      if (field.sinceTick < field.interval) {
+        this.fieldVisuals(field, dt);
+        continue;
+      }
+      field.sinceTick = 0;
+      this.fieldVisuals(field, dt);
+      field.pulse(field);
+    }
+  }
+
+  private fieldVisuals(field: UltimateField, dt: number): void {
+    const { particles } = this.ctx;
+    const spin = field.elapsed * 3.2;
+    const count = Math.max(1, Math.round(14 * Math.min(1, dt * 60)));
+    for (let i = 0; i < count; i++) {
+      const a = spin + (i / count) * Math.PI * 2;
+      const r = field.radius * (0.35 + 0.65 * ((i % 3) / 2));
+      particles.spark({
+        count: 1,
+        x: field.x + Math.cos(a) * r,
+        y: field.y + 0.4 + (i % 4) * 0.8,
+        z: field.z + Math.sin(a) * r,
+        vx: -Math.sin(a) * 7, vy: field.rise, vz: Math.cos(a) * 7, jitter: 1.2,
+        color: field.color, color2: 0xffffff,
+        size: 0.42, life: 0.5, gravity: field.rise * 0.4, drag: 1.1,
+      });
+    }
+  }
+
+  private beginField(init: Omit<UltimateField, 'elapsed' | 'sinceTick'>): UltimateField {
+    const field: UltimateField = { ...init, elapsed: 0, sinceTick: init.interval };
+    this.fields.push(field);
+    return field;
+  }
+
+  /** Where an Ultimate is centred: the aimed point, clamped to solid ground. */
+  private ultimateAnchor(range: number): THREE.Vector3 {
+    const solution = this.aim(range, false);
+    _target.set(solution.target.x, solution.target.y, solution.target.z);
+    const ground = this.ctx.world.groundHeight(_target.x, _target.z);
+    if (ground > 0) _target.y = ground;
+    return _target;
+  }
+
+  /**
+   * Water · Maelstrom.
+   *
+   * A rotating water field that pulls, soaks, grinds - and flash-freezes
+   * anything that has taken enough Freeze buildup while inside it.
+   */
+  private maelstrom(): UseResult {
+    const cfg = abilityCombat('maelstrom');
+    const anchor = this.ultimateAnchor(cfg.range).clone();
+    const radius = cfg.radius * this.mods.areaScale;
+    const dps = this.power(cfg.damage, 'water') * this.mods.ultimateDamage;
+    const boosted = this.hasG('ultimate-water');
+
+    this.ctx.audio.play('freeze');
+    this.ctx.flash(ELEMENTS.water.color, 0.45);
+    this.ctx.player.addShake(0.4, 4);
+    this.ctx.pulseLight(anchor.x, anchor.y + 3, anchor.z, ELEMENTS.water.color, 22, 1.2);
+    this.ctx.effects?.add('wet', anchor.x, anchor.y, anchor.z, radius, cfg.castTime! + 6, 0, 'player');
+    this.ctx.decals.add('wet', anchor.x, anchor.y + 0.02, anchor.z, _up, radius, cfg.castTime! + 6, 0.6);
+
+    const buildup = new Map<number, number>();
+    this.beginField({
+      x: anchor.x, y: anchor.y, z: anchor.z,
+      dirX: 0, dirZ: 0, speed: 0, rise: 3.4,
+      radius, duration: (cfg.castTime ?? 6) * (boosted ? 1.35 : 1),
+      interval: cfg.damageInterval ?? 0.5,
+      color: ELEMENTS.water.color,
+      pulse: (field) => {
+        _v.set(field.x, field.y + 1, field.z);
+        for (const e of this.ctx.enemies.within(_v, field.radius, _scratch)) {
+          _kb.copy(_v).sub(e.center).setY(0);
+          if (_kb.lengthSq() > 1e-4) _kb.normalize().multiplyScalar(7);
+          this.damageEnemy(
+            e, dps * field.interval, 'water', _kb, 0,
+            { id: 'wet', seconds: STATUS_TUNING.wetSeconds },
+          );
+          const stacks = (buildup.get(e.uid) ?? 0) + 1;
+          buildup.set(e.uid, stacks);
+          // Enough soaking inside the vortex and the water locks solid.
+          if (stacks >= 3 && !e.status.has('frozen')) {
+            const seconds = STATUS_TUNING.freezeSecondsWhenWet * this.mods.statusDuration;
+            e.status.apply('frozen', seconds);
+            e.applyFreeze(seconds);
+            this.ctx.confirmHit('status');
+          }
+        }
+      },
+    });
+
+    this.ctx.toast('Maelstrom', 'good');
+    return 'ok';
+  }
+
+  /**
+   * Fire · Inferno.
+   *
+   * A firestorm that ignites the arena for its whole duration. Burning
+   * creatures that fall inside it detonate, which is what makes it a finisher
+   * rather than just a large damage field.
+   */
+  private inferno(): UseResult {
+    const cfg = abilityCombat('inferno');
+    const anchor = this.ultimateAnchor(cfg.range).clone();
+    const radius = cfg.radius * this.mods.areaScale;
+    const dps = this.power(cfg.damage, 'fire') * this.mods.ultimateDamage;
+    const boosted = this.hasG('ultimate-fire');
+    const duration = (cfg.castTime ?? 6) * (boosted ? 1.4 : 1);
+
+    this.ctx.audio.play('flamewave');
+    this.ctx.flash(ELEMENTS.fire.color, 0.5);
+    this.ctx.player.addShake(0.5, 4);
+    this.ctx.pulseLight(anchor.x, anchor.y + 3, anchor.z, 0xff7a1a, 26, 1.4);
+
+    // The arena itself changes for the duration: burning ground, scorch marks,
+    // and any ice in the area melts.
+    this.ctx.effects?.add('burning', anchor.x, anchor.y, anchor.z, radius, duration + 4, dps * 0.35, 'player');
+    this.ctx.decals.add('scorch', anchor.x, anchor.y + 0.02, anchor.z, _up, radius, duration + 8, 0.85);
+
+    this.beginField({
+      x: anchor.x, y: anchor.y, z: anchor.z,
+      dirX: 0, dirZ: 0, speed: 0, rise: 4.4,
+      radius, duration,
+      interval: cfg.damageInterval ?? 0.5,
+      color: 0xffb04d,
+      pulse: (field) => {
+        _v.set(field.x, field.y + 1, field.z);
+        for (const e of this.ctx.enemies.within(_v, field.radius, _scratch)) {
+          const wasBurning = e.status.has('burning');
+          const alive = e.alive;
+          this.damageEnemy(
+            e, dps * field.interval, 'fire', null, 0,
+            { id: 'burning', seconds: STATUS_TUNING.burnSeconds, magnitude: this.power(STATUS_TUNING.burnDps, 'fire') },
+          );
+          // A burning creature that dies in the storm goes off.
+          if (wasBurning && alive && !e.alive) this.detonate(e.center, dps * 1.6, field.radius * 0.35);
+        }
+      },
+    });
+
+    this.ctx.toast('Inferno', 'good');
+    return 'ok';
+  }
+
+  /** Shared explosion used by Inferno and by corpse detonations. */
+  private detonate(centre: THREE.Vector3, damage: number, radius: number): void {
+    const point = centre.clone();
+    this.ctx.particles.spark({
+      count: 48, x: point.x, y: point.y, z: point.z, spread: 0.6, jitter: 9,
+      color: 0xffb04d, color2: 0xffe08a, size: 0.5, life: 0.6, gravity: 3, drag: 1.5,
+    });
+    this.ctx.pulseLight(point.x, point.y, point.z, 0xff8a2a, 16, 0.4);
+    for (const other of this.ctx.enemies.within(point, radius, _scratch2)) {
+      this.damageEnemy(other, damage, 'fire', null, 0.2);
+    }
+  }
+
+  /**
+   * Earth · Tectonic Rupture.
+   *
+   * One heavy strike that reshapes the arena: a shockwave, ground fractures,
+   * and a ring of raised cover the player can then fight from.
+   */
+  private tectonicRupture(): UseResult {
+    const { world, enemies, particles, audio, player, decals } = this.ctx;
+    const cfg = abilityCombat('tectonic-rupture');
+    const anchor = this.ultimateAnchor(cfg.range).clone();
+    if (world.groundHeight(anchor.x, anchor.z) <= 0) {
+      this.ctx.toast('Tectonic Rupture needs ground', 'warn');
+      return 'blocked';
+    }
+    const radius = cfg.radius * this.mods.areaScale;
+    const boosted = this.hasG('ultimate-earth');
+
+    audio.play('wall');
+    player.addShake(0.9, 3);
+    this.ctx.hitStop(0.1);
+    this.ctx.flash(ELEMENTS.earth.color, 0.5);
+    this.ctx.pulseLight(anchor.x, anchor.y + 2, anchor.z, ELEMENTS.earth.color, 18, 0.8);
+
+    // ---- shockwave
+    let struck = 0;
+    for (const e of enemies.within(anchor, radius, _scratch)) {
+      _kb.copy(e.center).sub(anchor).setY(0.5).normalize()
+        .multiplyScalar(this.power(cfg.knockback, 'earth'));
+      this.damageEnemy(
+        e, this.power(cfg.damage, 'earth') * this.mods.ultimateDamage, 'earth', _kb, cfg.stagger,
+        { id: 'stunned', seconds: 1.6 },
+      );
+      struck++;
+    }
+
+    // ---- fractures and craters, all inside the deformation budget
+    const spokes = boosted ? 10 : 7;
+    for (let i = 0; i < spokes; i++) {
+      const a = (i / spokes) * Math.PI * 2;
+      for (let step = 1; step <= 4; step++) {
+        const r = (radius / 4) * step;
+        const x = anchor.x + Math.cos(a) * r;
+        const z = anchor.z + Math.sin(a) * r;
+        const ground = world.groundHeight(x, z);
+        if (ground <= 0) continue;
+        world.normalAt(x, ground + 0.2, z, _normal);
+        decals.add('crack', x, ground + 0.02, z, _normal, 3, 30, 0.9);
+        this.ctx.effects?.deform(x, ground - 0.3, z, 1.8, -1.4, Mat.SOIL, 30);
+        particles.debris({
+          count: 10, x, y: ground + 0.8, z, spread: 1, vy: 7, jitter: 4,
+          color: 0x8a6440, color2: 0x503a24, size: 0.3, life: 1.2, gravity: -13, drag: 0.6,
+        });
+      }
+    }
+
+    // ---- a ring of defensive cover left standing around the player
+    const coverSeconds = boosted ? 26 : 18;
+    const pillars = boosted ? 8 : 6;
+    for (let i = 0; i < pillars; i++) {
+      const a = (i / pillars) * Math.PI * 2;
+      const x = player.position.x + Math.cos(a) * 4.6;
+      const z = player.position.z + Math.sin(a) * 4.6;
+      const ground = world.groundHeight(x, z);
+      if (ground <= 0) continue;
+      for (let h = 0; h < 3; h++) {
+        if (player.intersectsSphere(x, ground + 0.5 + h * 0.85, z, 1.5)) continue;
+        this.ctx.effects?.deform(x, ground + 0.5 + h * 0.85, z, 1.5, 2.4, Mat.STONE, coverSeconds);
+      }
+    }
+
+    player.unstick();
+    this.charge('terrain');
+    this.ctx.toast(struck > 0 ? `Tectonic Rupture struck ${struck}` : 'The arena breaks open', 'good');
+    return 'ok';
+  }
+
+  /**
+   * Air · Cyclone.
+   *
+   * A tornado that walks forward under its own power, dragging light creatures
+   * along, grinding heavy ones, and turning hostile projectiles around.
+   */
+  private cyclone(): UseResult {
+    const cfg = abilityCombat('cyclone');
+    const { player, projectiles, audio } = this.ctx;
+    player.getForward(_fwd);
+    const dir = new THREE.Vector3(_fwd.x, 0, _fwd.z);
+    if (dir.lengthSq() < 1e-4) dir.set(0, 0, -1);
+    dir.normalize();
+
+    const start = player.position.clone().addScaledVector(dir, 5);
+    const radius = cfg.radius * this.mods.areaScale;
+    const dps = this.power(cfg.damage, 'air') * this.mods.ultimateDamage;
+    const boosted = this.hasG('ultimate-air');
+
+    audio.play('gust');
+    this.ctx.flash(ELEMENTS.air.color, 0.4);
+    player.addShake(0.36, 5);
+
+    this.beginField({
+      x: start.x, y: this.ctx.world.groundHeight(start.x, start.z), z: start.z,
+      dirX: dir.x, dirZ: dir.z,
+      speed: (cfg.speed ?? 6) * (boosted ? 1.3 : 1),
+      rise: 6,
+      radius: radius * (boosted ? 1.2 : 1),
+      duration: (cfg.castTime ?? 7) * (boosted ? 1.25 : 1),
+      interval: cfg.damageInterval ?? 0.45,
+      color: ELEMENTS.air.color,
+      pulse: (field) => {
+        _v.set(field.x, field.y + 1.5, field.z);
+        for (const e of this.ctx.enemies.within(_v, field.radius, _scratch)) {
+          // Light creatures are dragged into the funnel; heavy ones are ground
+          // down where they stand.
+          const light = e.knockbackResist < 0.5;
+          _kb.copy(_v).sub(e.center).setY(light ? 1.4 : 0);
+          if (_kb.lengthSq() > 1e-4) _kb.normalize().multiplyScalar(light ? 9 : 2.5);
+          this.damageEnemy(e, dps * field.interval * (light ? 1 : 1.35), 'air', _kb, 0.2);
+        }
+        // Projectiles entering the funnel are thrown back at their owners.
+        _dirV.x = 0; _dirV.y = 1; _dirV.z = 0;
+        _originV.x = field.x; _originV.y = field.y + 1.5; _originV.z = field.z;
+        const turned = projectiles.deflect(
+          new THREE.Vector3(field.x, field.y + 1.5, field.z),
+          new THREE.Vector3(field.dirX, 0, field.dirZ),
+          field.radius, -1, 26, true,
+        );
+        if (turned > 0) this.charge('deflect');
+        // Loose environmental effects are swept clear as it passes.
+        this.ctx.effects?.clearObscurants(field.x, field.z, field.radius);
+      },
+    });
+
+    this.ctx.toast('Cyclone', 'good');
+    return 'ok';
   }
 }
 
+/** One sustained Ultimate field. */
+interface UltimateField {
+  x: number;
+  y: number;
+  z: number;
+  dirX: number;
+  dirZ: number;
+  /** Metres per second the field travels; 0 for a stationary field. */
+  speed: number;
+  /** Upward drift of the field's particles. */
+  rise: number;
+  radius: number;
+  duration: number;
+  elapsed: number;
+  /** Seconds between damage pulses. */
+  interval: number;
+  sinceTick: number;
+  color: number;
+  pulse: (field: UltimateField) => void;
+}
+
+const _v = new THREE.Vector3();
 const _down = new THREE.Vector3(0, -1, 0);
 const _origin = new THREE.Vector3();
 const _dir = new THREE.Vector3();

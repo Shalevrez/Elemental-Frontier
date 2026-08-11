@@ -7,7 +7,8 @@
 import type { ElementId } from '../elements/affinity';
 import type { BuildState } from './BuildState';
 import {
-  RARITY_WEIGHTS, UPGRADES, type Rarity, type UpgradeDef,
+  BASE_MODIFIERS, RARITY_WEIGHTS, REWARD_UPGRADES, accumulateStats, clampStats, describeUpgrade,
+  type EffectLine, type Rarity, type StatModifiers, type UpgradeDef,
 } from './upgrades';
 
 export interface RewardContext {
@@ -44,7 +45,7 @@ export function rarityWeightAt(rarity: Rarity, depth: number, luck = 0): number 
 
 /** Every upgrade that could legally be offered right now. */
 export function eligibleUpgrades(build: BuildState, ctx: RewardContext): UpgradeDef[] {
-  return UPGRADES.filter((def) => build.canOffer(def, ctx.elements, ctx.unlocked));
+  return REWARD_UPGRADES.filter((def) => build.canOffer(def, ctx.elements, ctx.unlocked));
 }
 
 /**
@@ -114,4 +115,85 @@ export function offerSubtitle(offer: RewardOffer): string {
 
 function capitalise(s: string): string {
   return s.length === 0 ? s : s[0]!.toUpperCase() + s.slice(1);
+}
+
+// =====================================================================
+//  Card presentation data
+// =====================================================================
+
+/** One row of the "how will my stats change" preview. */
+export interface StatDelta {
+  label: string;
+  before: string;
+  after: string;
+  /** True when the change helps the player. */
+  better: boolean;
+}
+
+export interface OfferPreview {
+  benefits: EffectLine[];
+  penalties: EffectLine[];
+  /** Exact before/after for the stats this card actually moves. */
+  deltas: StatDelta[];
+  /** How long the effect lasts. */
+  permanence: 'save' | 'world' | 'temporary';
+  /** Explicit warning text for a card with a major downside. */
+  warning: string | null;
+}
+
+/** Stats worth showing in the confirmation preview, with how to format them. */
+const PREVIEW_ROWS: { key: keyof StatModifiers; label: string; format: (v: number) => string; better: 'up' | 'down' }[] = [
+  { key: 'damageScale', label: 'Damage', format: (v) => `×${v.toFixed(2)}`, better: 'up' },
+  { key: 'maxHealth', label: 'Bonus health', format: (v) => `${v >= 0 ? '+' : ''}${Math.round(v)}`, better: 'up' },
+  { key: 'maxHealthScale', label: 'Health scale', format: (v) => `×${v.toFixed(2)}`, better: 'up' },
+  { key: 'maxEnergy', label: 'Bonus Mana', format: (v) => `${v >= 0 ? '+' : ''}${Math.round(v)}`, better: 'up' },
+  { key: 'maxEnergyScale', label: 'Mana scale', format: (v) => `×${v.toFixed(2)}`, better: 'up' },
+  { key: 'energyRegen', label: 'Mana regen', format: (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}/s`, better: 'up' },
+  { key: 'regenScale', label: 'Regen scale', format: (v) => `×${v.toFixed(2)}`, better: 'up' },
+  { key: 'cooldownScale', label: 'Cooldowns', format: (v) => `×${v.toFixed(2)}`, better: 'down' },
+  { key: 'costScale', label: 'Mana costs', format: (v) => `×${v.toFixed(2)}`, better: 'down' },
+  { key: 'moveScale', label: 'Move speed', format: (v) => `×${v.toFixed(2)}`, better: 'up' },
+  { key: 'critChance', label: 'Crit chance', format: (v) => `${Math.round(v * 100)}%`, better: 'up' },
+  { key: 'critScale', label: 'Crit damage', format: (v) => `×${v.toFixed(2)}`, better: 'up' },
+  { key: 'armor', label: 'Damage taken', format: (v) => `−${Math.round(v * 100)}%`, better: 'up' },
+  { key: 'areaScale', label: 'Area size', format: (v) => `×${v.toFixed(2)}`, better: 'up' },
+  { key: 'rangeScale', label: 'Range', format: (v) => `×${v.toFixed(2)}`, better: 'up' },
+  { key: 'ultimateDamage', label: 'Ultimate damage', format: (v) => `×${v.toFixed(2)}`, better: 'up' },
+  { key: 'ultimateGain', label: 'Ultimate charge', format: (v) => `×${v.toFixed(2)}`, better: 'up' },
+];
+
+/**
+ * Everything a selection card needs to be honest about an offer:
+ * the gains, the costs, and the exact stat values before and after.
+ */
+export function previewOffer(build: BuildState, def: UpgradeDef): OfferPreview {
+  const before = build.modifiers;
+  const after: StatModifiers = { ...BASE_MODIFIERS };
+  for (const key of Object.keys(before) as (keyof StatModifiers)[]) {
+    (after[key] as number) = before[key];
+  }
+  accumulateStats(after, def, 1);
+  clampStats(after);
+
+  const deltas: StatDelta[] = [];
+  for (const row of PREVIEW_ROWS) {
+    const a = before[row.key];
+    const b = after[row.key];
+    if (Math.abs(a - b) < 0.0005) continue;
+    deltas.push({
+      label: row.label,
+      before: row.format(a),
+      after: row.format(b),
+      better: row.better === 'up' ? b > a : b < a,
+    });
+  }
+
+  const { benefits, penalties } = describeUpgrade(def, 1);
+  return {
+    benefits,
+    penalties,
+    deltas,
+    permanence: def.permanence ?? 'save',
+    warning: def.warning ?? (penalties.length > 0 ? 'This reward has a real cost.' : null),
+  };
 }

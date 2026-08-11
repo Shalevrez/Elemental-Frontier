@@ -65,6 +65,38 @@ export const ABILITY_COMBAT: Readonly<Record<string, AbilityCombatDef>> = Object
   'air-dash': Object.freeze({
     damage: 9, range: 3.2, radius: 1.6, knockback: 6, stagger: 0.2,
   }),
+
+  // ---- Techniques (Q)
+  'tidal-pull': Object.freeze({
+    damage: 9, range: 18, radius: 7, knockback: 0, stagger: 0.5, splash: 7,
+  }),
+  'flame-dash': Object.freeze({
+    damage: 22, range: 12, radius: 1.5, knockback: 6, stagger: 0.3, speed: 30,
+  }),
+  'seismic-slam': Object.freeze({
+    damage: 24, range: 14, radius: 2.4, knockback: 7, stagger: 0.9, splash: 3,
+  }),
+  'air-blades': Object.freeze({
+    damage: 12, range: 26, radius: 0.5, speed: 44, knockback: 4, stagger: 0.15,
+  }),
+
+  // ---- Ultimates (middle mouse / R)
+  maelstrom: Object.freeze({
+    damage: 16, range: 20, radius: 11, knockback: 0, stagger: 0.3, splash: 11,
+    castTime: 6, damageInterval: 0.5,
+  }),
+  inferno: Object.freeze({
+    damage: 20, range: 20, radius: 12, knockback: 4, stagger: 0.2, splash: 12,
+    castTime: 6, damageInterval: 0.5,
+  }),
+  'tectonic-rupture': Object.freeze({
+    damage: 46, range: 18, radius: 12, knockback: 16, stagger: 1.4, splash: 12,
+    castTime: 1.2,
+  }),
+  cyclone: Object.freeze({
+    damage: 14, range: 24, radius: 7.5, knockback: 9, stagger: 0.4, splash: 7.5,
+    castTime: 7, damageInterval: 0.45, speed: 6,
+  }),
 });
 
 export function abilityCombat(id: string): AbilityCombatDef {
