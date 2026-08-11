@@ -139,9 +139,15 @@ export class Player {
 
   constructor(private readonly world: World) {}
 
-  /** The density field adapter the collision core works against. */
+  /**
+   * The density field the collision core works against.
+   *
+   * Deliberately *not* a cast: `World` has to structurally satisfy
+   * `DensityField`, so a signature drift between the two is a compile error
+   * rather than a runtime crash inside the movement loop.
+   */
   private get field(): DensityField {
-    return this.world as unknown as DensityField;
+    return this.world;
   }
 
   applyStats(stats: PlayerStats, keepRatios: boolean): void {

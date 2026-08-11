@@ -256,10 +256,19 @@ export class World {
     return densityAt(this.density, x, y, z);
   }
 
-  /** Outward surface normal at a point (points away from the solid). */
-  normalAt(x: number, y: number, z: number, out: THREE.Vector3): THREE.Vector3 {
+  /**
+   * Outward surface normal at a point (points away from the solid).
+   *
+   * `out` is any object with x/y/z, not necessarily a `THREE.Vector3`: the
+   * collision core is engine-free and passes plain vectors, so the fields are
+   * assigned directly rather than through `Vector3.set`.
+   */
+  normalAt<T extends { x: number; y: number; z: number }>(x: number, y: number, z: number, out: T): T {
     gradientAt(this.density, x, y, z, _grad);
-    return out.set(-_grad.x, -_grad.y, -_grad.z);
+    out.x = -_grad.x;
+    out.y = -_grad.y;
+    out.z = -_grad.z;
+    return out;
   }
 
   materialAt(x: number, y: number, z: number): number {

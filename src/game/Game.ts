@@ -696,11 +696,13 @@ export class Game {
   private enterPlay(): void {
     this.setState('playing');
     this.ui.applyTheme(this.affinity, this.activeElement);
-    this.input.requestLock();
     this.persist();
     // The opening plays once per save; each world introduces itself once.
+    // These run *before* the pointer is captured, so a story screen that opens
+    // here is immediately clickable rather than sitting behind a locked cursor.
     this.playStory(this.story.pending('opening'));
     this.playStory(this.story.pending('world-intro', this.worldId));
+    if (this.state === 'playing') this.input.requestLock();
   }
 
   private pause(): void {
@@ -754,8 +756,8 @@ export class Game {
   private continueAfterVictory(): void {
     this.audio.play('ui-click');
     this.setState('playing');
-    this.input.requestLock();
     this.playStory(this.story.pending('post-game'));
+    if (this.state === 'playing') this.input.requestLock();
   }
 
   private cancelConfirm(): void {

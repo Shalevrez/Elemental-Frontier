@@ -146,13 +146,28 @@ export class Input {
     this.element.removeEventListener('contextmenu', this.handleContextMenu);
   }
 
+  /**
+   * Whether the game currently wants the pointer captured.
+   *
+   * Pointer lock is granted asynchronously, so a request made just before a
+   * screen opens could otherwise resolve *after* the screen is up and leave
+   * the player unable to click anything. This flag lets a late grant be
+   * released immediately.
+   */
+  private wantsLock = false;
+
   requestLock(): void {
+    this.wantsLock = true;
     if (this.locked) return;
     const el = this.element as HTMLElement & { requestPointerLock?: () => Promise<void> | void };
     try {
       const result = el.requestPointerLock?.();
-      if (result && typeof (result as Promise<void>).catch === 'function') {
-        (result as Promise<void>).catch(() => { /* browser refused; menu stays open */ });
+      if (result && typeof (result as Promise<void>).then === 'function') {
+        (result as Promise<void>)
+          .then(() => {
+            if (!this.wantsLock && document.pointerLockElement) document.exitPointerLock();
+          })
+          .catch(() => { /* browser refused; menu stays open */ });
       }
     } catch {
       /* ignore - the user can click again */
@@ -160,6 +175,7 @@ export class Input {
   }
 
   exitLock(): void {
+    this.wantsLock = false;
     if (document.pointerLockElement) document.exitPointerLock();
   }
 
