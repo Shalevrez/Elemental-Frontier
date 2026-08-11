@@ -158,7 +158,7 @@ export const WORLDS: Readonly<Record<WorldId, WorldDef>> = Object.freeze({
       + 'vegetation nearest the Heart has been corrupted into something with opinions.',
     terrain: {
       baseHeight: 26, amplitude: 8.5, detail: 2.2, ridge: 12,
-      basinDepth: 24, basinThreshold: 0.44, caves: 1, warp: 5.4, rim: 20,
+      basinDepth: 42, basinThreshold: 0.6, caves: 1, warp: 5.4, rim: 20,
       islands: 0, submergence: 0.12,
     },
     palette: {
@@ -168,7 +168,7 @@ export const WORLDS: Readonly<Record<WorldId, WorldDef>> = Object.freeze({
     },
     materials: { surface: M.GRASS, subsurface: M.SOIL, deep: M.STONE, shore: M.SAND, accent: M.CLAY },
     weather: 'clear', weatherIntensity: 0.15,
-    seaLevel: 18, seaHazard: false, hazard: NO_HAZARD,
+    seaLevel: 21, seaHazard: false, hazard: NO_HAZARD,
     slippery: false, underwaterVisibility: 26, vegetation: 1,
     structures: ['overgrown-ruin', 'broken-bridge', 'root-arch', 'keeper-statue', 'sunken-cellar'],
     enemies: ['root-hunter', 'stone-beast', 'thorn-spitter', 'crawler', 'warden'],
@@ -191,9 +191,9 @@ export const WORLDS: Readonly<Record<WorldId, WorldDef>> = Object.freeze({
       + 'currents push you off course, waterfalls feed the channels, and half of every arena is '
       + 'flooded. There is plenty of dry land - you simply have to swim to reach it.',
     terrain: {
-      baseHeight: 22, amplitude: 10, detail: 3.0, ridge: 9,
-      basinDepth: 30, basinThreshold: 0.58, caves: 1.6, warp: 6.5, rim: 26,
-      islands: 1, submergence: 0.5,
+      baseHeight: 34, amplitude: 10, detail: 3.0, ridge: 9,
+      basinDepth: 14, basinThreshold: 0.46, caves: 1.6, warp: 6.5, rim: 26,
+      islands: 1.9, submergence: 0.5,
     },
     palette: {
       skyTop: 0x1e6fbe, skyHorizon: 0xa9dcef, ground: 0x2a4a58, fog: 0x74b8d6,
@@ -202,7 +202,7 @@ export const WORLDS: Readonly<Record<WorldId, WorldDef>> = Object.freeze({
     },
     materials: { surface: M.SAND, subsurface: M.CLAY, deep: M.STONE, shore: M.SAND, accent: M.ICE },
     weather: 'rain', weatherIntensity: 0.5,
-    seaLevel: 27, seaHazard: false, hazard: NO_HAZARD,
+    seaLevel: 24, seaHazard: false, hazard: NO_HAZARD,
     slippery: false, underwaterVisibility: 14, vegetation: 0.45,
     structures: ['drowned-ruin', 'air-pocket-cave', 'floating-platform', 'waterfall', 'stone-bridge'],
     enemies: ['shellback', 'tide-spirit', 'silt-lurker', 'crawler', 'mender'],
@@ -226,8 +226,8 @@ export const WORLDS: Readonly<Record<WorldId, WorldDef>> = Object.freeze({
       + 'bottom; the safe routes are the elevated stone shelves above it. Heat vents fire without '
       + 'warning, ash blinds, and the rock over the vents will not hold forever.',
     terrain: {
-      baseHeight: 24, amplitude: 10, detail: 4.0, ridge: 20,
-      basinDepth: 30, basinThreshold: 0.5, caves: 1.4, warp: 7.5, rim: 26,
+      baseHeight: 26, amplitude: 10, detail: 4.0, ridge: 20,
+      basinDepth: 44, basinThreshold: 0.62, caves: 1.4, warp: 7.5, rim: 26,
       islands: 0.35, submergence: 0.3,
     },
     palette: {
@@ -237,7 +237,7 @@ export const WORLDS: Readonly<Record<WorldId, WorldDef>> = Object.freeze({
     },
     materials: { surface: M.STONE, subsurface: M.SOIL, deep: M.STONE, shore: M.SAND, accent: M.CORRUPT },
     weather: 'ash', weatherIntensity: 0.85,
-    seaLevel: 14, seaHazard: true,
+    seaLevel: 18, seaHazard: true,
     hazard: Object.freeze({
       kind: 'lava' as const,
       // A brush against lava hurts and sets you alight; it does not delete you.
@@ -266,8 +266,8 @@ export const WORLDS: Readonly<Record<WorldId, WorldDef>> = Object.freeze({
       + 'The surface is slippery, the blizzards cut visibility to nothing, and the ice over the '
       + 'lakes breaks under weight. Frozen ruins mark where the last keepers stopped.',
     terrain: {
-      baseHeight: 34, amplitude: 13, detail: 3.0, ridge: 24,
-      basinDepth: 16, basinThreshold: 0.38, caves: 1.9, warp: 6.5, rim: 34,
+      baseHeight: 37, amplitude: 13, detail: 3.0, ridge: 24,
+      basinDepth: 50, basinThreshold: 0.7, caves: 1.9, warp: 6.5, rim: 34,
       islands: 0, submergence: 0.08,
     },
     palette: {
@@ -277,7 +277,7 @@ export const WORLDS: Readonly<Record<WorldId, WorldDef>> = Object.freeze({
     },
     materials: { surface: M.ICE, subsurface: M.STONE, deep: M.STONE, shore: M.ICE, accent: M.CLAY },
     weather: 'snow', weatherIntensity: 0.85,
-    seaLevel: 14, seaHazard: false,
+    seaLevel: 28, seaHazard: false,
     hazard: Object.freeze({
       kind: 'deep-cold' as const,
       contactDamage: 0, dotDamage: 3.5, dotSeconds: 6, warningBand: 0, name: 'Deep cold',

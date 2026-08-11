@@ -96,9 +96,11 @@ export function naturalHeight(x: number, z: number, seed: number, shape?: Partia
   // between them is genuine open sea rather than a puddle.
   if (s.islands > 0) {
     const archipelago = fbm2(x * 0.0135 - 310, z * 0.0135 + 118, seed + 15511, 4) * 2 - 1;
-    const shelf = smoothstep(-0.05, 0.42, archipelago);
+    // The mask has to straddle the noise's mean, otherwise almost every column
+    // reads as "channel" and the archipelago is just an ocean.
+    const shelf = smoothstep(-0.34, 0.22, archipelago);
     h -= (1 - shelf) * 16 * s.islands;
-    h += shelf * shelf * 9 * s.islands;
+    h += shelf * 15 * s.islands;
   }
 
   // Rolling coastal cliffs enclose the world instead of a hard wall.

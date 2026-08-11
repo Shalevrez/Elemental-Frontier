@@ -500,10 +500,11 @@ input[type='checkbox']:checked::after { transform: translateX(22px); background:
 
 #hud-objective {
   position: absolute;
-  top: 56px; left: 50%;
+  top: 54px; left: 50%;
   transform: translateX(-50%);
   display: flex; align-items: center; gap: 0.5rem;
-  padding: 0.34rem 0.8rem;
+  padding: 0.36rem 0.9rem;
+  max-width: min(560px, 72vw);
   font-size: 0.74rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -1289,13 +1290,14 @@ input[type='checkbox']:checked::after { transform: translateX(22px); background:
 
 /* ---- quiet story banner ---- */
 #story-banner {
-  position: absolute; top: 84px; left: 50%; transform: translateX(-50%);
+  /* Sits clear of the objective panel above it. */
+  position: absolute; top: 118px; left: 50%; transform: translateX(-50%);
   max-width: min(620px, 78vw); padding: 0.7rem 1.1rem;
   display: flex; flex-direction: column; gap: 0.25rem;
   border-left: 2px solid var(--accent);
   animation: banner-in 320ms ease-out;
 }
-#story-banner b { color: var(--accent); font-size: 0.84rem; letter-spacing: 0.09em; }
+#story-banner b { color: var(--accent); font-size: 0.84rem; letter-spacing: 0.09em; text-transform: uppercase; }
 #story-banner span { color: var(--text-dim); font-size: 0.78rem; line-height: 1.5; }
 @keyframes banner-in { from { opacity: 0; transform: translate(-50%, -8px); } }
 

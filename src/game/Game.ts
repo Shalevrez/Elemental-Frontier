@@ -1878,16 +1878,11 @@ export class Game {
 
   private finishUpgrade(): void {
     this.audio.play('ui-click');
-    if (this.save && allShrinesCleansed(this.save.shrines)) {
-      this.audio.play('victory');
-      this.ui.showVictory(
-        this.affinity, this.save.seed, this.worldMode,
-        this.accumulatedPlaytime, this.terrainMoved, this.enemies.kills,
-      );
-      this.setState('victory');
-      this.persist();
-      return;
-    }
+    // Restoring the last shrine of a world used to *be* the ending, back when
+    // there was one world. It now only opens the World Heart portal: the run
+    // continues, and the campaign ends at the portal in the final world so the
+    // final story beat and the post-game unlock go through completeCampaign().
+    if (this.save && allShrinesCleansed(this.save.shrines)) this.persist();
     this.setState('playing');
     this.input.requestLock();
   }
@@ -2973,6 +2968,8 @@ export class Game {
       oxygen: this.player.breath,
       maxOxygen: this.player.maxBreath,
       submerged: this.player.headInWater,
+      inWater: this.player.inWater,
+      inAirPocket: this.player.inAirPocket,
       onSlipperyGround: this.player.onSlipperyGround,
       ultimateUnlocked: this.ultimate.unlocked,
       ultimateCharge: this.ultimate.charge,
@@ -3002,6 +2999,31 @@ export class Game {
     respawn: (): void => { this.player.alive = false; this.player.health = 0; },
     forceRespawn: (): void => { this.respawn(); },
     teleport: (x: number, y: number, z: number): void => { this.player.teleport(x, y, z); },
+    /**
+     * Drop the player into this world's fluid, `depth` metres under the
+     * surface, by finding a column that is genuinely deep enough. Returns
+     * false when the world has no such column.
+     */
+    diveIntoFluid: (depth = 4): boolean => {
+      const level = this.world.fluidLevel;
+      let bestX = 0;
+      let bestZ = 0;
+      let deepest = Infinity;
+      // Coarse grid over the whole world, keeping the deepest column found.
+      for (let x = 16; x < WORLD_SIZE - 16; x += 3) {
+        for (let z = 16; z < WORLD_SIZE - 16; z += 3) {
+          const ground = this.world.groundHeight(x, z);
+          if (ground <= 0 || ground >= deepest) continue;
+          deepest = ground;
+          bestX = x;
+          bestZ = z;
+        }
+      }
+      if (deepest > level - 1.5) return false;
+      const y = Math.max(deepest + 0.6, level - depth);
+      this.player.teleport(bestX, y, bestZ);
+      return true;
+    },
     fillUltimate: (): void => {
       this.ultimate.unlocked = true;
       this.ultimate.charge = 100;
@@ -3025,10 +3047,14 @@ export class Game {
       }
       this.setState('playing');
     },
-    travelNext: (): void => {
+    travelNext: (): boolean => {
+      // The portal only fires from play, and so must this: calling it again
+      // mid-transition would stack world loads on top of each other.
+      if (this.state !== 'playing') return false;
       const target = nextWorld(this.worldId);
       if (target) this.travelToWorld(target);
       else this.completeCampaign();
+      return true;
     },
     newGamePlus: (): void => { this.startNewGamePlus(); },
     spendMana: (amount: number): void => { this.player.energy = Math.max(0, this.player.energy - amount); },
