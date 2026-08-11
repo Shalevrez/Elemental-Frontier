@@ -1,23 +1,36 @@
 /**
- * First-person player: movement, continuous terrain collision, camera, vitals.
+ * First-person player: movement, capsule collision, swimming, camera, vitals.
  *
- * Collision is a stack of spheres resolved against the density field. Because
- * the field is roughly a signed distance near the surface, a sphere of radius
- * r penetrates when `density > -r`, and pushing back along the surface normal
- * resolves it. That handles smooth slopes, craters, tunnels and overhangs
- * without any of the axis-by-axis special cases a voxel grid needs.
+ * Collision is a vertical capsule resolved against two things:
+ *   - the smooth density field, which is roughly a signed distance near the
+ *     surface, so a sphere of radius r penetrates when `density > -r` and
+ *     pushing back along the gradient resolves it, and
+ *   - the obstacle field, which holds every solid that is *not* terrain: tree
+ *     trunks, boulders, ruins, chests, portals and raised earth walls.
+ *
+ * Motion is swept in substeps, so nothing thin can be crossed between frames,
+ * and the resolver reports ground, ceiling and slope contacts separately so
+ * step-ups, slope limits and wall sliding all behave.
  */
 
 import * as THREE from 'three';
 import type { World } from '../world/World';
-import { SEA_LEVEL, WORLD_HEIGHT, WORLD_SIZE } from '../world/coords';
+import { WORLD_HEIGHT, WORLD_SIZE } from '../world/coords';
 import { Mat } from '../world/materials';
 import type { ElementId } from '../elements/affinity';
 import type { UpgradeTotals } from '../world/shrineData';
+import type { ObstacleField } from '../world/Obstacles';
+import {
+  BODY_SPHERES, EYE_HEIGHT, MAX_WALKABLE_NORMAL_Y, PLAYER_HEIGHT, PLAYER_RADIUS,
+  createContactReport, depenetrate, probeGround, sweepMove,
+  type ContactReport, type DensityField, type Vec3Like,
+} from './collision';
+import {
+  BASE_OXYGEN, createOxygenState, swimSpeedScale, tickOxygen,
+  type OxygenState,
+} from './oxygen';
 
-export const PLAYER_HEIGHT = 1.78;
-export const PLAYER_RADIUS = 0.35;
-export const EYE_HEIGHT = 1.6;
+export { PLAYER_HEIGHT, PLAYER_RADIUS, EYE_HEIGHT };
 
 const GRAVITY = 28;
 const JUMP_SPEED = 9.2;
@@ -27,8 +40,16 @@ const SWIM_SPEED = 3.1;
 const AIR_CONTROL = 0.45;
 const MAX_FALL = 55;
 const FALL_DAMAGE_THRESHOLD = 5;
-/** Seconds the player can stay submerged before drowning starts. */
-export const BREATH_SECONDS = 14;
+
+/**
+ * Seconds of air. Kept as the old export name so existing callers do not have
+ * to change; the real capacity now lives in the oxygen state and can be raised
+ * by upgrades.
+ */
+export const BREATH_SECONDS = BASE_OXYGEN;
+
+/** Seconds of damage immunity granted immediately after a respawn. */
+export const RESPAWN_PROTECTION = 3;
 
 export type PlayMode = 'element' | 'terrain';
 
@@ -37,15 +58,8 @@ export interface PlayerStats extends UpgradeTotals {}
 const _forward = new THREE.Vector3();
 const _right = new THREE.Vector3();
 const _wish = new THREE.Vector3();
-const _normal = new THREE.Vector3();
 const _eye = new THREE.Vector3();
-
-/** Sphere stack approximating the player's body, as [heightOffset, radius]. */
-const BODY_SPHERES: readonly (readonly [number, number])[] = [
-  [0.36, 0.35],
-  [0.95, 0.35],
-  [1.5, 0.32],
-];
+const _delta: Vec3Like = { x: 0, y: 0, z: 0 };
 
 export class Player {
   readonly position = new THREE.Vector3();
@@ -66,14 +80,23 @@ export class Player {
   mode: PlayMode = 'element';
 
   invulnTimer = 0;
+  /** Longer, explicitly-signalled immunity after respawning. */
+  respawnProtection = 0;
   fallStartY = 0;
   falling = false;
   airDashAvailable = true;
   dashGrace = 0;
   alive = true;
 
-  /** Remaining breath, seconds. Drowning damage starts when it hits zero. */
-  breath = BREATH_SECONDS;
+  /** Oxygen while submerged. Drowning damage starts when it hits zero. */
+  readonly oxygen: OxygenState = createOxygenState();
+  /** Extra lung capacity, in seconds, from upgrades and blessings. */
+  bonusOxygen = 0;
+  /** Multiplier on the oxygen drain rate; lower is better. */
+  oxygenDrainScale = 1;
+  /** True when the player's head is inside an air pocket while submerged. */
+  inAirPocket = false;
+
   /** Temporary flat damage reduction from upgrades, 0..0.75. */
   tempArmor = 0;
   private tempArmorTimer = 0;
@@ -84,6 +107,16 @@ export class Player {
   /** True while the player is taking continuing environmental damage. */
   takingDamageOverTime = false;
 
+  /** Set by the game when the ground underfoot has been made slippery. */
+  onSlipperyGround = false;
+  /** Multiplier on sprint speed only, from tradeoff cards. */
+  sprintScale = 1;
+
+  /** The last collision contact, exposed for the collision debug overlay. */
+  readonly contact: ContactReport = createContactReport();
+  /** Set when the last frame's motion was blocked by an obstacle. */
+  lastBlockedByObstacle = false;
+
   stats: PlayerStats = {
     maxHealth: 100, maxEnergy: 100, energyRegen: 7,
     cooldownScale: 1, moveScale: 1, powerScale: 1,
@@ -91,11 +124,13 @@ export class Player {
 
   activeElement: ElementId = 'air';
 
+  /** Solid volumes that are not terrain. Assigned by the game on load. */
+  obstacles: ObstacleField | null = null;
+
   private bobPhase = 0;
   private shake = 0;
   private shakeDecay = 6;
   private wasInWater = false;
-  private drownTick = 0;
 
   onLand: ((impactSpeed: number) => void) | null = null;
   onSplash: (() => void) | null = null;
@@ -103,6 +138,11 @@ export class Player {
   onDrown: ((amount: number) => void) | null = null;
 
   constructor(private readonly world: World) {}
+
+  /** The density field adapter the collision core works against. */
+  private get field(): DensityField {
+    return this.world as unknown as DensityField;
+  }
 
   applyStats(stats: PlayerStats, keepRatios: boolean): void {
     const healthRatio = this.maxHealth > 0 ? this.health / this.maxHealth : 1;
@@ -126,11 +166,31 @@ export class Player {
     this.falling = false;
     this.fallStartY = y;
     this.airDashAvailable = true;
-    this.breath = BREATH_SECONDS;
+    this.oxygen.oxygen = this.oxygen.maxOxygen;
+    this.oxygen.drownTimer = 0;
+  }
+
+  /** Grant the post-respawn grace period. */
+  protectAfterRespawn(seconds = RESPAWN_PROTECTION): void {
+    this.respawnProtection = Math.max(this.respawnProtection, seconds);
+    this.invulnTimer = Math.max(this.invulnTimer, seconds);
   }
 
   get eyePosition(): THREE.Vector3 {
     return _eye.set(this.position.x, this.position.y + EYE_HEIGHT, this.position.z);
+  }
+
+  /** Remaining oxygen in seconds, kept under the old name for the HUD. */
+  get breath(): number {
+    return this.oxygen.oxygen;
+  }
+
+  set breath(value: number) {
+    this.oxygen.oxygen = Math.max(0, Math.min(this.oxygen.maxOxygen, value));
+  }
+
+  get maxBreath(): number {
+    return this.oxygen.maxOxygen;
   }
 
   getForward(target: THREE.Vector3): THREE.Vector3 {
@@ -147,6 +207,7 @@ export class Player {
 
   update(dt: number, moveX: number, moveZ: number, jump: boolean, sprint: boolean): void {
     if (this.invulnTimer > 0) this.invulnTimer -= dt;
+    if (this.respawnProtection > 0) this.respawnProtection -= dt;
     if (this.dashGrace > 0) this.dashGrace -= dt;
     if (this.tempArmorTimer > 0) {
       this.tempArmorTimer -= dt;
@@ -162,26 +223,31 @@ export class Player {
     if (wishLen > 0.001) _wish.divideScalar(wishLen);
 
     this.sprinting = sprint && moveZ > 0.1 && !this.inWater;
-    let speed = this.sprinting ? SPRINT_SPEED : WALK_SPEED;
+    let speed = this.sprinting ? SPRINT_SPEED * this.sprintScale : WALK_SPEED;
     if (this.activeElement === 'air' && this.sprinting) speed *= 1.12;
-    if (this.inWater) speed = SWIM_SPEED;
+    if (this.inWater) speed = SWIM_SPEED * swimSpeedScale(this.activeElement);
     speed *= this.stats.moveScale;
 
     const control = this.onGround || this.inWater ? 1 : AIR_CONTROL;
-    const accel = (this.inWater ? 12 : 55) * control;
+    // Ice gives the player far less purchase, which is what makes the frozen
+    // world handle differently rather than just look different.
+    const grip = this.onSlipperyGround && !this.inWater ? 0.22 : 1;
+    const accel = (this.inWater ? 12 : 55) * control * grip;
     const targetX = _wish.x * speed * Math.min(1, wishLen);
     const targetZ = _wish.z * speed * Math.min(1, wishLen);
     this.velocity.x += (targetX - this.velocity.x) * Math.min(1, accel * dt);
     this.velocity.z += (targetZ - this.velocity.z) * Math.min(1, accel * dt);
 
     if (wishLen < 0.01 && (this.onGround || this.inWater)) {
-      const friction = Math.max(0, 1 - (this.inWater ? 4 : 13) * dt);
+      const drag = this.inWater ? 4 : this.onSlipperyGround ? 1.4 : 13;
+      const friction = Math.max(0, 1 - drag * dt);
       this.velocity.x *= friction;
       this.velocity.z *= friction;
     }
 
     if (jump) {
       if (this.inWater) {
+        // Controlled ascent while swimming.
         this.velocity.y = Math.min(this.velocity.y + 32 * dt, 4.6);
       } else if (this.onGround) {
         this.velocity.y = JUMP_SPEED * (this.activeElement === 'air' ? 1.18 : 1);
@@ -192,6 +258,7 @@ export class Player {
     }
 
     if (this.inWater) {
+      // Sinking is slow and controllable; crouch dives, jump climbs.
       this.velocity.y -= 9 * dt;
       this.velocity.y = Math.max(this.velocity.y, -3.4);
       if (!jump) this.velocity.y *= 0.94;
@@ -208,9 +275,6 @@ export class Player {
 
     this.integrate(dt);
 
-    const regenScale = this.inWater ? 0.7 : 1;
-    this.energy = Math.min(this.maxEnergy, this.energy + this.energyRegen * regenScale * dt);
-
     if (this.shake > 0) this.shake = Math.max(0, this.shake - this.shakeDecay * dt);
     const planarSpeed = Math.hypot(this.velocity.x, this.velocity.z);
     if (this.onGround && planarSpeed > 0.6) this.bobPhase += dt * planarSpeed * 1.5;
@@ -219,6 +283,8 @@ export class Player {
     this.position.x = Math.min(WORLD_SIZE - margin, Math.max(margin, this.position.x));
     this.position.z = Math.min(WORLD_SIZE - margin, Math.max(margin, this.position.z));
     if (this.position.y < -8) {
+      // Fell out of the world: put the body back on the surface rather than
+      // letting it keep falling forever.
       this.position.y = this.world.groundHeight(this.position.x, this.position.z) + 0.2;
       this.velocity.set(0, 0, 0);
       this.falling = false;
@@ -233,16 +299,18 @@ export class Player {
   /** True when open water is within a couple of metres (Water's passive). */
   nearWater(): boolean {
     if (this.inWater) return true;
-    return this.position.y < SEA_LEVEL + 2.5
-      && this.world.groundHeight(this.position.x, this.position.z) < SEA_LEVEL + 1.5;
+    const level = this.world.fluidLevel;
+    return this.position.y < level + 2.5
+      && this.world.groundHeight(this.position.x, this.position.z) < level + 1.5;
   }
 
   private updateFluidState(dt: number): void {
+    const level = this.world.fluidLevel;
     const feetY = this.position.y + 0.2;
     const headY = this.position.y + EYE_HEIGHT;
-    // Water is the sea plane: anything below sea level that is not inside rock.
-    this.inWater = feetY < SEA_LEVEL && !this.world.isSolid(this.position.x, feetY, this.position.z);
-    this.headInWater = headY < SEA_LEVEL && !this.world.isSolid(this.position.x, headY, this.position.z);
+    // The fluid is a plane: anything below it that is not inside rock.
+    this.inWater = feetY < level && !this.world.isSolid(this.position.x, feetY, this.position.z);
+    this.headInWater = headY < level && !this.world.isSolid(this.position.x, headY, this.position.z);
 
     if (this.inWater && !this.wasInWater) {
       if (this.velocity.y < -6) this.onSplash?.();
@@ -250,73 +318,53 @@ export class Player {
     }
     this.wasInWater = this.inWater;
 
-    // --------------------------------------------------------- breath
+    // --------------------------------------------------------- oxygen
     this.takingDamageOverTime = false;
-    if (this.headInWater) {
-      this.breath = Math.max(0, this.breath - dt);
-      if (this.breath <= 0) {
-        this.takingDamageOverTime = true;
-        this.drownTick += dt;
-        if (this.drownTick >= 1) {
-          this.drownTick = 0;
-          const amount = Math.max(4, this.maxHealth * 0.06);
-          this.applyDamage(amount, null, 0, true);
-          this.onDrown?.(amount);
-        }
-      }
-    } else {
-      this.breath = Math.min(BREATH_SECONDS, this.breath + dt * 4);
-      this.drownTick = 0;
+    // Lava is not breathable and is not swimmable either: a hazard fluid never
+    // counts as an air pocket.
+    const tick = tickOxygen(this.oxygen, dt, {
+      headSubmerged: this.headInWater,
+      inAirPocket: this.inAirPocket && !this.world.fluidIsHazard,
+      element: this.activeElement,
+      bonusCapacity: this.bonusOxygen,
+      drainScale: this.oxygenDrainScale,
+      maxHealth: this.maxHealth,
+    });
+    if (this.headInWater && this.oxygen.oxygen <= 0) this.takingDamageOverTime = true;
+    if (tick.damage > 0) {
+      this.applyDamage(tick.damage, null, 0, true);
+      this.onDrown?.(tick.damage);
     }
   }
 
-  /** Integrate motion then resolve terrain penetration. */
+  /** Integrate motion with swept collision, then settle ground state. */
   private integrate(dt: number): void {
     const wasFalling = this.falling;
-    this.position.addScaledVector(this.velocity, dt);
+    _delta.x = this.velocity.x * dt;
+    _delta.y = this.velocity.y * dt;
+    _delta.z = this.velocity.z * dt;
 
-    const grounded = this.resolvePenetration();
+    sweepMove(this.field, this.position, this.velocity, _delta, this.obstacles, this.contact);
+    this.lastBlockedByObstacle = this.contact.corrections > 0 && this.contact.ny === 0;
+
+    const probe = probeGround(this.field, this.position, this.velocity.y, this.obstacles);
     const wasOnGround = this.onGround;
-    this.onGround = grounded || this.probeGround();
+    this.onGround = this.contact.grounded || probe.grounded;
 
+    // Standing on an obstacle top (a chest, a ledge of ruin) is real ground.
+    if (!this.onGround && this.obstacles && this.velocity.y <= 0.5) {
+      const support = this.obstacles.supportHeight(
+        this.position.x, this.position.z, this.position.y + 0.35, PLAYER_RADIUS,
+      );
+      if (support !== null && this.position.y - support <= 0.35 && this.position.y >= support - 0.35) {
+        this.position.y = support;
+        this.onGround = true;
+      }
+    }
+
+    if (this.contact.ceiling && this.velocity.y > 0) this.velocity.y = 0;
     if (this.onGround && !wasOnGround && wasFalling) this.handleLanding();
     if (this.onGround && this.velocity.y < 0) this.velocity.y = 0;
-  }
-
-  /**
-   * Push the body out of solid terrain. Returns true when a contact normal was
-   * facing up enough to count as standing on the ground.
-   */
-  private resolvePenetration(): boolean {
-    let grounded = false;
-    for (let iteration = 0; iteration < 5; iteration++) {
-      let worst = 0;
-      let worstOffset = 0;
-      for (const [oy, radius] of BODY_SPHERES) {
-        const d = this.world.densityAt(this.position.x, this.position.y + oy, this.position.z);
-        const penetration = d + radius;
-        if (penetration > worst) {
-          worst = penetration;
-          worstOffset = oy;
-        }
-      }
-      if (worst <= 0.001) break;
-
-      this.world.normalAt(this.position.x, this.position.y + worstOffset, this.position.z, _normal);
-      if (_normal.lengthSq() < 0.0001) _normal.set(0, 1, 0);
-      this.position.addScaledVector(_normal, Math.min(0.5, worst));
-
-      if (_normal.y > 0.45) grounded = true;
-      const into = this.velocity.dot(_normal);
-      if (into < 0) this.velocity.addScaledVector(_normal, -into);
-    }
-    return grounded;
-  }
-
-  /** Cheap downward probe so standing exactly on the surface still counts. */
-  private probeGround(): boolean {
-    if (this.velocity.y > 0.5) return false;
-    return this.world.densityAt(this.position.x, this.position.y - 0.14, this.position.z) > -0.05;
   }
 
   private handleLanding(): void {
@@ -334,12 +382,14 @@ export class Player {
     }
   }
 
-  /** True when the body overlaps solid terrain right now. */
+  /** True when the body overlaps solid terrain or a solid obstacle right now. */
   isStuck(): boolean {
     for (const [oy, radius] of BODY_SPHERES) {
       if (this.world.densityAt(this.position.x, this.position.y + oy, this.position.z) + radius > 0.12) return true;
     }
-    return false;
+    return this.obstacles?.overlaps(
+      this.position.x, this.position.y, this.position.z, PLAYER_RADIUS, PLAYER_HEIGHT,
+    ) ?? false;
   }
 
   /** True when a sphere would intersect the player's body. */
@@ -355,19 +405,28 @@ export class Player {
   }
 
   /**
-   * Lift the player free of solid terrain. Used after Raise Wall and whenever
-   * an edit or a stale saved position leaves the body inside the ground, so
-   * terrain shaping can never permanently trap anyone.
+   * Lift the player free of anything solid.
+   *
+   * Used after Raise Wall and whenever an edit or a stale saved position leaves
+   * the body inside the ground, so terrain shaping can never permanently trap
+   * anyone. Depenetration is tried first, because pushing sideways out of a
+   * wall is far less jarring than being lifted through it.
    */
   unstick(): boolean {
     if (!this.isStuck()) return false;
+
+    depenetrate(this.field, this.position, this.velocity, this.obstacles, this.contact, 8);
+    if (!this.isStuck()) {
+      this.velocity.set(0, 0, 0);
+      return true;
+    }
+
     for (let up = 0.25; up <= 8; up += 0.25) {
       this.position.y += 0.25;
       if (!this.isStuck()) {
         this.velocity.set(0, 0, 0);
         return true;
       }
-      void up;
     }
     const gy = this.world.groundHeight(this.position.x, this.position.z);
     this.position.y = gy + 0.3;
@@ -375,10 +434,25 @@ export class Player {
     return true;
   }
 
+  /** Slope of the ground under the player, as the normal's upward component. */
+  groundNormalY(): number {
+    const probe = probeGround(this.field, this.position, 0, this.obstacles);
+    return probe.normalY;
+  }
+
+  /** True when the ground under the player is too steep to walk on. */
+  onSteepGround(): boolean {
+    const ny = this.groundNormalY();
+    return ny > 0 && ny < MAX_WALKABLE_NORMAL_Y;
+  }
+
   // -------------------------------------------------------------- damage
 
   applyDamage(amount: number, from: THREE.Vector3 | null, knockback: number, ignoreInvuln = false): number {
     if (!this.alive) return 0;
+    // Respawn protection stops *everything*, including environmental damage,
+    // so a respawn next to a hazard is survivable.
+    if (this.respawnProtection > 0) return 0;
     if (!ignoreInvuln && this.invulnTimer > 0) return 0;
 
     let dmg = amount;
@@ -464,11 +538,12 @@ export class Player {
 
   // -------------------------------------------------------------- camera
 
-  applyToCamera(camera: THREE.PerspectiveCamera): void {
+  applyToCamera(camera: THREE.PerspectiveCamera, shakeScale = 1): void {
     const bob = this.onGround ? Math.sin(this.bobPhase * 2) * 0.042 * (this.sprinting ? 1.5 : 1) : 0;
     const sway = this.onGround ? Math.cos(this.bobPhase) * 0.028 * (this.sprinting ? 1.4 : 1) : 0;
-    const shakeX = this.shake > 0 ? (Math.random() - 0.5) * this.shake * 0.22 : 0;
-    const shakeY = this.shake > 0 ? (Math.random() - 0.5) * this.shake * 0.22 : 0;
+    const s = this.shake * shakeScale;
+    const shakeX = s > 0 ? (Math.random() - 0.5) * s * 0.22 : 0;
+    const shakeY = s > 0 ? (Math.random() - 0.5) * s * 0.22 : 0;
 
     camera.position.set(
       this.position.x + sway * 0.5 + shakeX,
@@ -478,7 +553,7 @@ export class Player {
     camera.rotation.order = 'YXZ';
     camera.rotation.y = this.yaw + shakeX * 0.4;
     camera.rotation.x = this.pitch + shakeY * 0.4;
-    camera.rotation.z = sway * 0.12 + (this.shake > 0 ? (Math.random() - 0.5) * this.shake * 0.05 : 0);
+    camera.rotation.z = sway * 0.12 + (s > 0 ? (Math.random() - 0.5) * s * 0.05 : 0);
   }
 
   /** Clamp the player inside the vertical bounds of the world. */

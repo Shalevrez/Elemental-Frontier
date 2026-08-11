@@ -12,14 +12,30 @@ import { SHRINE_COUNT, SHRINE_SITES, type WorldMode } from '../world/shrineData'
 import { CONSUMABLES, CONSUMABLE_ORDER, type ConsumableId } from '../player/inventory';
 import { formatPlaytime, timeAgo, type QualityPreset, type SaveData, type Settings } from '../save/saveData';
 import { RARITY_COLORS } from '../progression/upgrades';
-import type { RewardOffer } from '../progression/rewards';
+import type { OfferPreview, RewardOffer } from '../progression/rewards';
 import { offerSubtitle } from '../progression/rewards';
+import type { ChestOutcome } from '../progression/chests';
 import type { SynergyMatch } from '../progression/BuildState';
 import { STATUSES, type StatusId } from '../combat/status';
 
 export type ScreenName =
   | 'title' | 'settings' | 'loading' | 'reveal' | 'pause' | 'death'
-  | 'upgrade' | 'victory' | 'confirm' | 'newworld' | 'satchel' | 'reward' | 'none';
+  | 'upgrade' | 'victory' | 'confirm' | 'newworld' | 'satchel' | 'reward'
+  | 'chest' | 'story' | 'none';
+
+/** One ability slot as the HUD shows it. */
+export interface HudAbility {
+  name: string;
+  input: string;
+  /** 0..1 cooldown sweep. */
+  cooldown: number;
+  /** Seconds of cooldown left, shown as a number. */
+  cooldownSeconds: number;
+  ready: boolean;
+  /** Mana cost, or 0 for the Ultimate. */
+  cost: number;
+  affordable: boolean;
+}
 
 export interface HudState {
   health: number;
@@ -34,6 +50,27 @@ export interface HudState {
   secondaryCd: number;
   primaryReady: boolean;
   secondaryReady: boolean;
+  /** Every active ability, in HUD order. */
+  abilities: HudAbility[];
+  /** 0..1 Ultimate meter. */
+  ultimateCharge: number;
+  ultimateReady: boolean;
+  ultimateUnlocked: boolean;
+  /** Mana bar state, drives the low / paused / resting styling. */
+  manaState: 'normal' | 'low' | 'empty' | 'paused' | 'resting' | 'free';
+  /** True while the element's terrain is boosting Mana regeneration. */
+  manaTerrainBonus: boolean;
+  /** 0..1 oxygen, only shown while submerged. */
+  oxygen: number;
+  submerged: boolean;
+  /** Active blessings and penalties. */
+  buffs: { name: string; color: number; fraction: number; penalty: boolean }[];
+  /** How many permanent upgrades the build holds. */
+  permanentUpgrades: number;
+  /** Name of the current world. */
+  worldName: string;
+  /** The current story objective line. */
+  objective: string;
   shrinesCleansed: number;
   yaw: number;
   playerX: number;
@@ -80,6 +117,8 @@ export interface MenuCallbacks {
   onCloseSatchel(): void;
   onTakeReward(id: string): void;
   onSkipReward(): void;
+  onCloseChest(): void;
+  onCloseStory(): void;
   onAnyInteraction(): void;
 }
 
@@ -114,6 +153,18 @@ const CROSSHAIR_STATES = [
   'neutral', 'target', 'blocked', 'cooldown', 'no-energy', 'invalid',
 ] as const;
 
+/** Stable node ids so the game can flash a specific ability slot. */
+const ABILITY_NODE_IDS = [
+  'ability-primary', 'ability-secondary', 'ability-technique', 'ability-ultimate',
+];
+
+/** How a reward's lifetime is described on its card. */
+const PERMANENCE_LABEL: Record<'save' | 'world' | 'temporary', string> = {
+  save: 'Permanent for this save',
+  world: 'Lasts for this world',
+  temporary: 'Temporary',
+};
+
 export class UI {
   private hitConfirmTimer = 0;
   private screens: Record<Exclude<ScreenName, 'none'>, HTMLElement>;
@@ -136,6 +187,11 @@ export class UI {
   private tutorialSteps: TutorialStep[] = [];
   private tutorialTitle = 'First steps';
   private newWorldMode: WorldMode = 'normal';
+  /** Which reward card the keyboard is on. */
+  private rewardFocus = 0;
+  private storyBannerTimer = 0;
+  private lastAbilitySignature = '';
+  private lastBuffSignature = '';
 
   constructor() {
     this.screens = {
@@ -151,6 +207,8 @@ export class UI {
       newworld: el('screen-newworld'),
       satchel: el('screen-satchel'),
       reward: el('screen-reward'),
+      chest: el('screen-chest'),
+      story: el('screen-story'),
     };
     this.buildCompassTicks();
     this.buildElementRail('air', false);
@@ -188,6 +246,8 @@ export class UI {
     click('btn-victory-new', () => callbacks.onVictoryNewWorld());
     click('btn-satchel-close', () => callbacks.onCloseSatchel());
     click('btn-reward-skip', () => callbacks.onSkipReward());
+    click('btn-chest-close', () => callbacks.onCloseChest());
+    click('btn-story-close', () => callbacks.onCloseStory());
     click('btn-confirm-no', () => {
       this.confirmAction = null;
       callbacks.onCancelConfirm();
@@ -244,6 +304,46 @@ export class UI {
     toggle('set-shadows', (v) => ({ shadows: v }));
     toggle('set-post', (v) => ({ postProcessing: v }));
     toggle('set-aa', (v) => ({ antialias: v }));
+    toggle('set-reduce-flash', (v) => ({ reducedFlashes: v }));
+    toggle('set-reduce-shake', (v) => ({ reducedShake: v }));
+    toggle('set-reduce-distort', (v) => ({ reducedDistortion: v }));
+    toggle('set-reduce-particles', (v) => ({ reducedParticles: v }));
+
+    // Reward cards support the keyboard as well as the mouse: 1-3 or the arrow
+    // keys move the focus, Enter takes the focused card.
+    window.addEventListener('keydown', (e) => {
+      if (this.current !== 'reward') return;
+      const cards = [...el<HTMLElement>('reward-cards').querySelectorAll<HTMLButtonElement>('.reward-card')];
+      if (cards.length === 0) return;
+      if (e.code.startsWith('Digit')) {
+        const index = Number(e.code.slice(5)) - 1;
+        if (index >= 0 && index < cards.length) {
+          e.preventDefault();
+          cards[index]!.focus();
+          this.setRewardFocus(index);
+        }
+        return;
+      }
+      if (e.code === 'ArrowRight' || e.code === 'ArrowLeft') {
+        e.preventDefault();
+        const step = e.code === 'ArrowRight' ? 1 : -1;
+        const next = (this.rewardFocus + step + cards.length) % cards.length;
+        cards[next]!.focus();
+        this.setRewardFocus(next);
+        return;
+      }
+      if (e.code === 'Enter' || e.code === 'Space') {
+        e.preventDefault();
+        cards[this.rewardFocus]?.click();
+      }
+    });
+  }
+
+  private setRewardFocus(index: number): void {
+    this.rewardFocus = index;
+    const cards = [...el<HTMLElement>('reward-cards').querySelectorAll<HTMLElement>('.reward-card')];
+    cards.forEach((card, i) => card.classList.toggle('focused', i === index));
+    this.callbacks?.onAnyInteraction();
   }
 
   // ------------------------------------------------------------- screens
@@ -336,6 +436,10 @@ export class UI {
     el<HTMLInputElement>('set-shadows').checked = settings.shadows;
     el<HTMLInputElement>('set-post').checked = settings.postProcessing;
     el<HTMLInputElement>('set-aa').checked = settings.antialias;
+    el<HTMLInputElement>('set-reduce-flash').checked = settings.reducedFlashes;
+    el<HTMLInputElement>('set-reduce-shake').checked = settings.reducedShake;
+    el<HTMLInputElement>('set-reduce-distort').checked = settings.reducedDistortion;
+    el<HTMLInputElement>('set-reduce-particles').checked = settings.reducedParticles;
     for (const preset of ['low', 'medium', 'high'] as const) {
       el<HTMLElement>(`btn-quality-${preset}`).classList.toggle('selected', settings.quality === preset);
     }
@@ -382,28 +486,47 @@ export class UI {
     healthWrap.classList.toggle('regen', state.regenActive);
     healthWrap.classList.toggle('healing', state.effect !== null);
 
-    el<HTMLElement>('energy-fill').style.width = `${energyPct * 100}%`;
+    const energyBar = el<HTMLElement>('energy-fill');
+    energyBar.style.width = `${energyPct * 100}%`;
     el<HTMLElement>('energy-text').textContent = `${Math.round(state.energy)} / ${Math.round(state.maxEnergy)}`;
+    const energyWrap = energyBar.parentElement!;
+    for (const cls of ['mana-low', 'mana-empty', 'mana-paused', 'mana-resting', 'mana-free']) {
+      energyWrap.classList.remove(cls);
+    }
+    if (state.manaState !== 'normal') energyWrap.classList.add(`mana-${state.manaState}`);
+    energyWrap.classList.toggle('mana-terrain', state.manaTerrainBonus);
 
-    // ---- breath meter appears only while submerged
+    // ---- oxygen appears only while the head is under a fluid
     const breathWrap = el<HTMLElement>('breath-bar');
-    const submerged = state.breath < state.maxBreath - 0.05;
-    breathWrap.classList.toggle('hidden', !submerged);
-    if (submerged) {
-      el<HTMLElement>('breath-fill').style.width = `${Math.max(0, state.breath / state.maxBreath) * 100}%`;
+    breathWrap.classList.toggle('hidden', !state.submerged);
+    if (state.submerged) {
+      const frac = Math.max(0, Math.min(1, state.oxygen));
+      el<HTMLElement>('breath-fill').style.width = `${frac * 100}%`;
+      breathWrap.classList.toggle('critical', frac < 0.25);
+      breathWrap.querySelector('span')!.textContent = frac <= 0
+        ? 'Drowning'
+        : `Oxygen ${Math.ceil(frac * state.maxBreath)}s`;
     }
 
-    el<HTMLElement>('objective-text').textContent = `Shrines cleansed ${state.shrinesCleansed}/${SHRINE_COUNT}`;
+    // ---- ultimate meter
+    const ult = el<HTMLElement>('ultimate-meter');
+    ult.classList.toggle('hidden', !state.ultimateUnlocked);
+    if (state.ultimateUnlocked) {
+      el<HTMLElement>('ultimate-fill').style.width = `${Math.round(state.ultimateCharge * 100)}%`;
+      ult.classList.toggle('ready', state.ultimateReady);
+      ult.querySelector('span')!.textContent = state.ultimateReady
+        ? 'Ultimate ready · MMB / R'
+        : `Ultimate ${Math.round(state.ultimateCharge * 100)}%`;
+    }
+
+    el<HTMLElement>('objective-text').textContent = state.objective;
+    el<HTMLElement>('world-name').textContent = state.worldName;
     const modeTagWorld = el<HTMLElement>('world-mode-tag');
     modeTagWorld.textContent = state.worldMode === 'peaceful' ? 'Peaceful' : 'Normal';
     modeTagWorld.classList.toggle('peaceful', state.worldMode === 'peaceful');
 
-    const primary = el<HTMLElement>('ability-primary');
-    const secondary = el<HTMLElement>('ability-secondary');
-    (primary.querySelector('.cd-sweep') as HTMLElement).style.transform = `scaleY(${state.primaryCd})`;
-    (secondary.querySelector('.cd-sweep') as HTMLElement).style.transform = `scaleY(${state.secondaryCd})`;
-    primary.classList.toggle('ready', state.primaryReady);
-    secondary.classList.toggle('ready', state.secondaryReady);
+    this.updateAbilityRail(state);
+    this.updateBuffStrip(state);
 
     const modeTag = el<HTMLElement>('mode-tag');
     modeTag.querySelector('span')!.textContent = state.mode === 'terrain' ? 'Terrain Mode' : 'Element Mode';
@@ -431,6 +554,74 @@ export class UI {
 
     this.updateHealingRail(state);
     this.updateCompass(state);
+  }
+
+  /**
+   * Rebuild the ability rail.
+   *
+   * Every active ability - primary, secondary, technique and Ultimate - shows
+   * its name, its input, its Mana cost and its live cooldown. The cost only
+   * appears when it is relevant, so the rail stays quiet when it can afford
+   * everything.
+   */
+  private updateAbilityRail(state: HudState): void {
+    const rail = el<HTMLElement>('ability-rail');
+    const signature = state.abilities.map((a) => `${a.name}:${a.input}:${Math.round(a.cost)}`).join('|');
+    if (signature !== this.lastAbilitySignature) {
+      this.lastAbilitySignature = signature;
+      rail.innerHTML = '';
+      for (const ability of state.abilities) {
+        const node = document.createElement('div');
+        node.className = 'ability';
+        node.id = ABILITY_NODE_IDS[state.abilities.indexOf(ability)] ?? '';
+        node.innerHTML =
+          '<div class="cd-sweep"></div>'
+          + `<span class="ability-key">${ability.input}</span>`
+          + `<span class="ability-name">${ability.name}</span>`
+          + '<span class="ability-cost"></span>'
+          + '<span class="ability-cd"></span>';
+        rail.appendChild(node);
+      }
+    }
+
+    const nodes = rail.children;
+    for (let i = 0; i < nodes.length && i < state.abilities.length; i++) {
+      const ability = state.abilities[i]!;
+      const node = nodes[i] as HTMLElement;
+      (node.querySelector('.cd-sweep') as HTMLElement).style.transform = `scaleY(${ability.cooldown})`;
+      node.classList.toggle('ready', ability.ready);
+      node.classList.toggle('unaffordable', !ability.affordable && ability.cost > 0);
+      const cost = node.querySelector('.ability-cost') as HTMLElement;
+      cost.textContent = ability.cost > 0 ? `${Math.round(ability.cost)}` : '';
+      cost.classList.toggle('hidden', ability.cost <= 0);
+      const cd = node.querySelector('.ability-cd') as HTMLElement;
+      cd.textContent = ability.cooldownSeconds > 0.05 ? `${ability.cooldownSeconds.toFixed(1)}s` : '';
+    }
+  }
+
+  /**
+   * Buffs and penalties currently on the player.
+   *
+   * Collapsed to name plus a timer bar; the full numbers live in the pause
+   * menu so the HUD never becomes a spreadsheet.
+   */
+  private updateBuffStrip(state: HudState): void {
+    const strip = el<HTMLElement>('buff-strip');
+    const signature = state.buffs.map((b) => `${b.name}:${b.penalty ? 1 : 0}`).join('|')
+      + `#${state.permanentUpgrades}`;
+    if (signature !== this.lastBuffSignature) {
+      this.lastBuffSignature = signature;
+      strip.innerHTML = state.buffs.map((b) =>
+        `<div class="buff-chip${b.penalty ? ' penalty' : ''}" style="--bc:${cssColor(b.color)}">`
+        + `<b>${b.name}</b><i></i></div>`).join('')
+        + (state.permanentUpgrades > 0
+          ? `<div class="buff-chip permanent"><b>${state.permanentUpgrades} permanent</b></div>`
+          : '');
+    }
+    const chips = strip.querySelectorAll<HTMLElement>('.buff-chip i');
+    for (let i = 0; i < chips.length && i < state.buffs.length; i++) {
+      chips[i]!.style.width = `${Math.max(0, Math.min(1, state.buffs[i]!.fraction)) * 100}%`;
+    }
   }
 
   private updateTerrainBar(state: HudState): void {
@@ -605,6 +796,14 @@ export class UI {
     if (text !== null) node.textContent = text;
   }
 
+  /** Show or hide the development collision readout. `null` hides it. */
+  setCollisionDebug(text: string | null): void {
+    const node = document.getElementById('collision-debug');
+    if (!node) return;
+    node.classList.toggle('hidden', text === null);
+    if (text !== null) node.textContent = text;
+  }
+
   /**
    * Persistent aim state, updated every frame.
    *
@@ -647,41 +846,128 @@ export class UI {
     }).join('');
   }
 
-  /** Present the three reward choices. */
-  showRewards(offers: RewardOffer[], synergies: SynergyMatch[]): void {
+  /**
+   * Present the reward choices.
+   *
+   * Each card carries everything the player needs to decide without guessing:
+   * the element sigil, the rarity, the exact numbers it will change, its
+   * penalties in a distinct warning style, its stack count, its synergy, how
+   * long it lasts, and a before/after preview of the stats it moves.
+   */
+  showRewards(offers: (RewardOffer & { preview: OfferPreview })[], synergies: SynergyMatch[]): void {
     const wrap = el<HTMLElement>('reward-cards');
     wrap.innerHTML = '';
-    for (const offer of offers) {
-      const colour = cssColor(RARITY_COLORS[offer.def.rarity]);
+    this.rewardFocus = 0;
+
+    offers.forEach((offer, index) => {
+      const def = offer.def;
+      const colour = cssColor(RARITY_COLORS[def.rarity]);
+      const element = def.element === 'any' ? null : ELEMENTS[def.element];
       const card = document.createElement('button');
       card.type = 'button';
-      card.className = 'reward-card';
+      card.className = `reward-card rar-${def.rarity}${def.tradeoff ? ' tradeoff' : ''}${index === 0 ? ' focused' : ''}`;
       card.style.setProperty('--rar', colour);
+      card.style.setProperty('--el', cssColor(element ? element.color : RARITY_COLORS[def.rarity]));
+
+      const benefits = offer.preview.benefits
+        .map((line) => `<li class="good">${line.text}</li>`).join('');
+      const penalties = offer.preview.penalties
+        .map((line) => `<li class="bad"><i>!</i>${line.text}</li>`).join('');
+      const deltas = offer.preview.deltas
+        .map((d) => `<div class="delta${d.better ? ' up' : ' down'}">`
+          + `<span>${d.label}</span><em>${d.before}</em><b>→</b><strong>${d.after}</strong></div>`)
+        .join('');
+
       const tags: string[] = [];
-      if (offer.owned > 0) {
-        tags.push(`<span class="reward-tag own">owned ${offer.owned}/${offer.def.maxStacks}</span>`);
-      }
-      if (offer.synergyHit) {
-        tags.push(`<span class="reward-tag syn">synergy: ${offer.synergyHit}</span>`);
-      }
-      for (const tag of offer.def.tags) tags.push(`<span class="reward-tag">${tag}</span>`);
+      tags.push(`<span class="reward-tag stack">${offer.owned}/${def.maxStacks} stacks</span>`);
+      if (offer.synergyHit) tags.push(`<span class="reward-tag syn">synergy · ${offer.synergyHit}</span>`);
+      for (const tag of def.tags) tags.push(`<span class="reward-tag">${tag}</span>`);
+
       card.innerHTML =
-        `<span class="reward-rarity">${offerSubtitle(offer)}</span>`
-        + `<span class="reward-name">${offer.def.name}</span>`
-        + `<span class="reward-desc">${offer.def.description}</span>`
+        `<span class="reward-head">`
+        + `<svg class="reward-sigil"><use href="${element ? element.symbol : '#sym-convergence'}" /></svg>`
+        + `<span class="reward-titles"><b class="reward-name">${def.name}</b>`
+        + `<em class="reward-rarity">${offerSubtitle(offer)}</em></span>`
+        + `<kbd>${index + 1}</kbd></span>`
+        + `<span class="reward-desc">${def.description}</span>`
+        + `<ul class="reward-effects">${benefits}${penalties}</ul>`
+        + (def.warning && offer.preview.penalties.length > 0
+          ? `<span class="reward-warning"><i>⚠</i>${def.warning}</span>` : '')
+        + `<span class="reward-element">${element ? `${element.name} compatible` : 'Any element'}`
+        + ` · ${PERMANENCE_LABEL[offer.preview.permanence]}</span>`
+        + (deltas ? `<div class="reward-preview"><span>Stat preview</span>${deltas}</div>` : '')
         + `<span class="reward-meta">${tags.join('')}</span>`;
+
       card.addEventListener('click', () => {
         this.callbacks?.onAnyInteraction();
-        this.callbacks?.onTakeReward(offer.def.id);
+        this.callbacks?.onTakeReward(def.id);
       });
+      card.addEventListener('mouseenter', () => this.setRewardFocus(index));
+      card.addEventListener('focus', () => this.setRewardFocus(index));
       wrap.appendChild(card);
-    }
+    });
 
     const syn = el<HTMLElement>('reward-synergies');
     syn.innerHTML = synergies.length > 0
       ? `Active synergies: ${synergies.map((x) => `<b>${x.tag}</b> (${x.members.length})`).join(' · ')}`
-      : '';
+      : 'Pick with the mouse, the number keys, or the arrow keys and Enter.';
     this.showScreen('reward');
+    window.setTimeout(() => {
+      wrap.querySelector<HTMLButtonElement>('.reward-card')?.focus();
+    }, 30);
+  }
+
+  /**
+   * Show what a chest contained.
+   *
+   * The card states the rarity, the exact numbers, whether the effect is
+   * permanent for this save or temporary, and any downside - a chest reward
+   * can never land silently.
+   */
+  showChest(outcome: ChestOutcome, rarityLabel: string): void {
+    const colour = cssColor(RARITY_COLORS[outcome.rarity]);
+    const root = el<HTMLElement>('chest-card');
+    root.className = `chest-card rar-${outcome.rarity}`;
+    root.style.setProperty('--rar', colour);
+
+    el<HTMLElement>('chest-rarity').textContent = rarityLabel;
+    el<HTMLElement>('chest-name').textContent = outcome.name;
+    el<HTMLElement>('chest-summary').textContent = outcome.summary;
+    el<HTMLElement>('chest-icon').querySelector('use')!.setAttribute('href', outcome.symbol);
+
+    const duration = outcome.permanence === 'save'
+      ? 'Permanent for this save'
+      : outcome.seconds > 0
+        ? `Temporary · ${Math.round(outcome.seconds)}s`
+        : 'Applied immediately';
+    el<HTMLElement>('chest-duration').textContent = duration;
+    el<HTMLElement>('chest-duration').classList.toggle('temporary', outcome.permanence !== 'save');
+
+    el<HTMLElement>('chest-effects').innerHTML =
+      outcome.benefits.map((l) => `<li class="${l.tone}">${l.text}</li>`).join('')
+      + outcome.penalties.map((l) => `<li class="bad"><i>!</i>${l.text}</li>`).join('');
+
+    const warning = el<HTMLElement>('chest-warning');
+    warning.classList.toggle('hidden', !outcome.warning);
+    if (outcome.warning) warning.innerHTML = `<i>⚠</i>${outcome.warning}`;
+
+    this.showScreen('chest');
+  }
+
+  /** A blocking story sequence. */
+  showStory(title: string, lines: readonly string[], seen: boolean): void {
+    el<HTMLElement>('story-title').textContent = title;
+    el<HTMLElement>('story-body').innerHTML = lines.map((l) => `<p>${l}</p>`).join('');
+    el<HTMLElement>('btn-story-close').textContent = seen ? 'Skip' : 'Continue';
+    this.showScreen('story');
+  }
+
+  /** A quiet story banner that never takes control away. */
+  showStoryBanner(title: string, text: string, seconds: number): void {
+    const node = el<HTMLElement>('story-banner');
+    node.innerHTML = `<b>${title}</b><span>${text}</span>`;
+    node.classList.remove('hidden');
+    this.storyBannerTimer = seconds;
   }
 
   /** Render the run build into the pause menu. */
@@ -753,6 +1039,10 @@ export class UI {
     if (this.healFlashTimer > 0) {
       this.healFlashTimer -= dt;
       if (this.healFlashTimer <= 0) el<HTMLElement>('fx-heal').style.opacity = '0';
+    }
+    if (this.storyBannerTimer > 0) {
+      this.storyBannerTimer -= dt;
+      if (this.storyBannerTimer <= 0) el<HTMLElement>('story-banner').classList.add('hidden');
     }
     this.tickRevealAnimation(dt);
   }
@@ -959,11 +1249,17 @@ export class UI {
   showVictory(
     affinity: AffinityId, seed: number, mode: WorldMode,
     playtime: number, terrainMoved: number, enemiesFelled: number,
+    finalWorld = false,
   ): void {
     const pres = affinityPresentation(affinity);
     const styled = affinity === 'convergence' ? 'a vessel of the Elemental Convergence' : `a ${pres.title}`;
-    el<HTMLElement>('victory-desc').textContent =
-      `The blight is broken on every shrine. As ${styled}, you carried the Verdance back into the light.`;
+    el<HTMLElement>('victory-desc').textContent = finalWorld
+      ? `Every World Heart beats again. As ${styled}, you held the worlds together - and everything you built `
+        + 'is yours to keep. Continue exploring, or begin again stronger with the same build.'
+      : `The blight is broken on every shrine here. As ${styled}, you carried this world back into the light.`;
+    el<HTMLElement>('btn-victory-continue').textContent = finalWorld
+      ? 'Continue in the post-game'
+      : 'Keep exploring';
     el<HTMLElement>('victory-stats').innerHTML = [
       `<div><b>${formatPlaytime(playtime)}</b><span>Time</span></div>`,
       `<div><b>${Math.round(terrainMoved)}</b><span>Terrain shaped</span></div>`,

@@ -706,6 +706,110 @@ export function buildSupplyCache(): PropBuild {
   return { group, materials, animated: [band] };
 }
 
+/**
+ * A reward chest.
+ *
+ * Its banding, glow and the crown of shards above it are tinted by rarity, so
+ * a legendary chest is readable across an arena before it is opened. The lid is
+ * returned as an animated part so the game can play a real opening motion.
+ */
+export function buildChest(rarityColor: number, rarityIndex: number): PropBuild & { lid: THREE.Object3D } {
+  const group = new THREE.Group();
+  const materials: THREE.Material[] = [];
+
+  const wood = new THREE.MeshStandardMaterial({ color: 0x5a4028, roughness: 0.85 });
+  const metal = new THREE.MeshStandardMaterial({
+    color: rarityColor,
+    emissive: new THREE.Color(rarityColor),
+    emissiveIntensity: 0.6 + rarityIndex * 0.5,
+    roughness: 0.35,
+    metalness: 0.5,
+  });
+  materials.push(wood, metal);
+
+  const base = new THREE.Mesh(cached('chest-base', () => new THREE.BoxGeometry(1.1, 0.62, 0.78)), wood);
+  base.position.y = 0.31;
+  base.castShadow = true;
+  base.receiveShadow = true;
+  group.add(base);
+
+  // The lid pivots on a hinge group so the opening animation reads correctly.
+  const hinge = new THREE.Group();
+  hinge.position.set(0, 0.62, -0.39);
+  const lid = new THREE.Mesh(
+    cached('chest-lid', () => {
+      const geo = new THREE.CylinderGeometry(0.39, 0.39, 1.1, 12, 1, false, 0, Math.PI);
+      geo.rotateZ(Math.PI / 2);
+      return geo;
+    }),
+    wood,
+  );
+  lid.position.set(0, 0, 0.39);
+  lid.castShadow = true;
+  hinge.add(lid);
+  group.add(hinge);
+
+  for (const y of [0.14, 0.5]) {
+    const band = new THREE.Mesh(cached('chest-band', () => new THREE.BoxGeometry(1.14, 0.08, 0.82)), metal);
+    band.position.y = y;
+    group.add(band);
+  }
+  const lock = new THREE.Mesh(cached('chest-lock', () => new THREE.BoxGeometry(0.2, 0.24, 0.12)), metal);
+  lock.position.set(0, 0.56, 0.42);
+  group.add(lock);
+
+  // Rarity crown: one floating shard per rarity step above common.
+  const shards: THREE.Object3D[] = [];
+  for (let i = 0; i < rarityIndex; i++) {
+    const a = (i / Math.max(1, rarityIndex)) * Math.PI * 2;
+    const shard = new THREE.Mesh(cached('chest-shard', () => new THREE.OctahedronGeometry(0.11, 0)), metal);
+    shard.position.set(Math.cos(a) * 0.44, 1.1 + Math.sin(a * 2) * 0.1, Math.sin(a) * 0.44);
+    group.add(shard);
+    shards.push(shard);
+  }
+
+  return { group, materials, animated: [hinge, ...shards], lid: hinge };
+}
+
+/**
+ * A world-transition portal: a standing ring of keeper stone with a lit core.
+ *
+ * The core is returned as an animated part so it can pulse while the world's
+ * objective is incomplete and open fully once the World Heart is restored.
+ */
+export function buildPortal(color: number): PropBuild {
+  const group = new THREE.Group();
+  const stone = new THREE.MeshStandardMaterial({ color: 0x6b6f78, roughness: 0.92 });
+  const glow = new THREE.MeshStandardMaterial({
+    color,
+    emissive: new THREE.Color(color),
+    emissiveIntensity: 2.6,
+    roughness: 0.2,
+    transparent: true,
+    opacity: 0.72,
+    side: THREE.DoubleSide,
+  });
+  const materials = [stone, glow];
+
+  const arch = new THREE.Mesh(cached('portal-arch', () => new THREE.TorusGeometry(2.1, 0.28, 10, 26)), stone);
+  arch.position.y = 2.4;
+  arch.castShadow = true;
+  group.add(arch);
+
+  for (const side of [-1, 1]) {
+    const leg = new THREE.Mesh(cached('portal-leg', () => new THREE.CylinderGeometry(0.3, 0.42, 2.5, 8)), stone);
+    leg.position.set(side * 2.0, 1.25, 0);
+    leg.castShadow = true;
+    group.add(leg);
+  }
+
+  const core = new THREE.Mesh(cached('portal-core', () => new THREE.CircleGeometry(1.86, 26)), glow);
+  core.position.y = 2.4;
+  group.add(core);
+
+  return { group, materials, animated: [core] };
+}
+
 /** A ritual mote: the peaceful-mode objective pickup. */
 export function buildMote(color: number): PropBuild {
   const group = new THREE.Group();

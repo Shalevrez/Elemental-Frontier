@@ -119,6 +119,7 @@
       <!-- ============ HUD ============ -->
       <div id="hud" class="hidden">
         <div id="combat-debug" class="hidden"></div>
+        <div id="collision-debug" class="hidden"></div>
         <div id="crosshair"><span></span><span></span><span></span><span></span><i></i><b id="crosshair-ring"></b></div>
 
         <div id="hud-compass" class="panel">
@@ -128,35 +129,29 @@
 
         <div id="hud-objective" class="panel">
           <svg class="ico"><use href="#sym-shrine" /></svg>
-          <span id="objective-text">Shrines cleansed 0/4</span>
+          <span class="objective-lines">
+            <b id="world-name">Verdant Ruins</b>
+            <span id="objective-text">Restore the World Heart</span>
+          </span>
           <em id="world-mode-tag">Normal</em>
         </div>
+
+        <div id="story-banner" class="panel hidden"><b></b><span></span></div>
 
         <div id="hud-left">
           <div id="vitals">
             <div class="bar bar-health"><div id="health-fill" class="fill"></div><span id="health-text">100 / 100</span></div>
             <div class="bar bar-energy"><div id="energy-fill" class="fill"></div><span id="energy-text">100 / 100</span></div>
-            <div id="breath-bar" class="bar bar-breath hidden"><div id="breath-fill" class="fill"></div><span>Breath</span></div>
+            <div id="breath-bar" class="bar bar-breath hidden"><div id="breath-fill" class="fill"></div><span>Oxygen</span></div>
+            <div id="ultimate-meter" class="bar bar-ultimate hidden"><div id="ultimate-fill" class="fill"></div><span>Ultimate 0%</span></div>
           </div>
           <div id="heal-effect" class="heal-effect hidden"><span>Sunberries</span><i></i></div>
+          <div id="buff-strip"></div>
         </div>
 
         <div id="hud-bottom">
           <div id="element-rail"></div>
-          <div id="ability-rail">
-            <div class="ability" id="ability-primary">
-              <div class="ability-icon"><svg class="ico"><use href="#sym-primary" /></svg></div>
-              <div class="cd-sweep"></div>
-              <div class="ability-key">LMB</div>
-              <div class="ability-name">—</div>
-            </div>
-            <div class="ability" id="ability-secondary">
-              <div class="ability-icon"><svg class="ico"><use href="#sym-secondary" /></svg></div>
-              <div class="cd-sweep"></div>
-              <div class="ability-key">RMB</div>
-              <div class="ability-name">—</div>
-            </div>
-          </div>
+          <div id="ability-rail"></div>
 
           <div id="terrain-bar" class="hidden">
             <div id="material-slots"></div>
@@ -251,6 +246,12 @@
           <div class="setting setting-toggle"><label for="set-shadows">Shadows</label><input id="set-shadows" type="checkbox" /></div>
           <div class="setting setting-toggle"><label for="set-post">Post-processing &amp; bloom</label><input id="set-post" type="checkbox" /></div>
           <div class="setting setting-toggle"><label for="set-aa">Anti-aliasing</label><input id="set-aa" type="checkbox" /></div>
+
+          <div class="settings-group">Accessibility</div>
+          <div class="setting setting-toggle"><label for="set-reduce-flash">Reduce flashes</label><input id="set-reduce-flash" type="checkbox" /></div>
+          <div class="setting setting-toggle"><label for="set-reduce-shake">Reduce screen shake</label><input id="set-reduce-shake" type="checkbox" /></div>
+          <div class="setting setting-toggle"><label for="set-reduce-distort">Reduce distortion</label><input id="set-reduce-distort" type="checkbox" /></div>
+          <div class="setting setting-toggle"><label for="set-reduce-particles">Reduce particle density</label><input id="set-reduce-particles" type="checkbox" /></div>
 
           <div class="settings-group">Controls &amp; view</div>
           <div class="setting"><label for="set-sens">Mouse sensitivity</label><input id="set-sens" type="range" min="0.2" max="3" step="0.05" /><output id="out-sens"></output></div>
@@ -392,6 +393,36 @@
       </section>
 
       <!-- Toasts sit above every screen so menu warnings are visible too. -->
+      <!-- ============ Chest reward ============ -->
+      <section id="screen-chest" class="screen hidden">
+        <div class="screen-inner narrow">
+          <h1 class="screen-title">Chest opened</h1>
+          <div id="chest-card" class="chest-card">
+            <div class="chest-head">
+              <div class="chest-sigil"><svg id="chest-icon" class="ico"><use href="#sym-vitality" /></svg></div>
+              <div class="chest-titles">
+                <em id="chest-rarity">Common</em>
+                <b id="chest-name">Reward</b>
+              </div>
+            </div>
+            <p id="chest-summary" class="chest-summary"></p>
+            <ul id="chest-effects" class="chest-effects"></ul>
+            <div id="chest-warning" class="chest-warning hidden"></div>
+            <div id="chest-duration" class="chest-duration">Permanent for this save</div>
+          </div>
+          <div class="menu"><button id="btn-chest-close" class="btn btn-primary" type="button">Take it</button></div>
+        </div>
+      </section>
+
+      <!-- ============ Story ============ -->
+      <section id="screen-story" class="screen hidden">
+        <div class="screen-inner narrow story-inner">
+          <h2 id="story-title" class="screen-title">The Bound Wanderer</h2>
+          <div id="story-body" class="story-body"></div>
+          <div class="menu"><button id="btn-story-close" class="btn btn-primary" type="button">Continue</button></div>
+        </div>
+      </section>
+
       <div id="toasts"></div>
 
       <div id="fps" class="hidden"></div>
