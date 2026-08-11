@@ -32,6 +32,11 @@ it made of blocks.
 - [Combat](#combat)
 - [Staying alive: regeneration, food, potions and rest](#staying-alive-regeneration-food-potions-and-rest)
 - [Graphics settings](#graphics-settings)
+- [The story](#the-story)
+- [Worlds](#worlds)
+- [Swimming and oxygen](#swimming-and-oxygen)
+- [Chests](#chests)
+- [Reward cards and tradeoffs](#reward-cards-and-tradeoffs)
 - [Save data](#save-data)
 - [Project structure](#project-structure)
 - [Tests](#tests)
@@ -136,6 +141,7 @@ over HTTPS, so this works out of the box.
 | `Escape` | Pause and release the mouse |
 | `F3` | Toggle the performance readout |
 | `F9` | Toggle the combat debug overlay (development builds only) |
+| `F10` | Toggle the collision debug overlay (development builds only) |
 
 ### Element Mode
 
@@ -143,6 +149,12 @@ over HTTPS, so this works out of the box.
 | --- | --- |
 | Left mouse | Primary elemental ability |
 | Right mouse | Secondary elemental ability |
+| `Q` | Elemental technique |
+| Middle mouse **click** | Ultimate — only when the Ultimate meter is full |
+| `R` | Ultimate, for anyone without a middle mouse button |
+
+Middle-click and wheel scrolling are read as two completely separate inputs, so **scrolling the
+wheel can never fire an Ultimate**. None of the Element Mode bindings are read in Terrain Mode.
 
 ### Terrain Mode
 
@@ -167,8 +179,9 @@ only ever shows their own element.
 
 ### Changed in this update
 
-`Tab` now toggles **Terrain Mode** rather than the old Build Mode; left/right mouse there excavate
-and deposit instead of breaking and placing blocks. `[`, `]`, `H` and `I` are new.
+`Tab` toggles **Terrain Mode** rather than the old Build Mode; left/right mouse there excavate and
+deposit instead of breaking and placing blocks. `Q`, middle-click, `R` and `F10` are new: every
+element now has four actives (primary, secondary, technique, Ultimate) rather than two.
 
 ---
 
@@ -222,12 +235,53 @@ slightly smaller focused power bonus from shrine blessings.
 
 Every active ability costs **aether**, has its own cooldown, particle effect and synthesised sound.
 
-| Element | Primary (LMB) | Secondary (RMB) | Passive |
-| --- | --- | --- | --- |
-| **Air** | **Gust** — wide cone of wind, light damage, heavy knockback, deflects slow enemy bolts back at them | **Air Dash** — snap forward; one extra dash while airborne, refreshed on landing; negates fall damage when timed | **Featherstep** — higher jump, faster sprint, greatly reduced fall damage |
-| **Water** | **Water Whip** — curving lash that damages and slows; ~30 % stronger near open water | **Freeze** — locks up nearby creatures and, over open water, conjures a walkable sheet of bound ice | **Tidemend** — near water, recovery starts sooner and runs faster, and food and potions heal more |
-| **Earth** | **Rock Shot** — a heavy irregular boulder that dents the ground where it lands | **Raise Wall** — sculpts a smooth earthen ridge out of the terrain, then lets it crumble away | **Rootbound** — less knockback and less physical damage on firm ground |
-| **Fire** | **Fireball** — fast glowing ember that bursts and applies burning | **Flame Wave** — fan of ground fire that ignites everything it reaches and stops at walls | **Last Ember** — fire damage rises as your health falls |
+| Element | Primary (LMB) | Secondary (RMB) | Technique (Q) | Ultimate (MMB / R) | Passive |
+| --- | --- | --- | --- | --- | --- |
+| **Air** | **Gust** — wide cone of wind, heavy knockback, deflects slow bolts back at their owner, clears smoke and fans fire | **Air Dash** — snap forward; one extra dash while airborne | **Air Blades** — three fast wind blades that pierce light creatures and ricochet off terrain | **Cyclone** — a tornado that walks forward, drags light creatures in, turns projectiles around and grinds heavies down | **Featherstep** — higher jump, faster sprint, greatly reduced fall damage |
+| **Water** | **Water Whip** — curving lash that soaks, chills and slows; stronger near open water, and it wets the ground it lands on | **Freeze** — locks up nearby creatures, lays walkable ice over open water, and leaves slippery frost | **Tidal Pull** — drags soaked creatures together, interrupts wind-ups and sets up the freeze combo | **Maelstrom** — a rotating water field that pulls, soaks and grinds, then flash-freezes anything it has soaked enough | **Tidemend** — near water, recovery starts sooner and runs faster |
+| **Earth** | **Rock Shot** — a heavy irregular boulder that dents the ground where it lands | **Raise Wall** — sculpts a real earthen ridge out of the terrain, then lets it crumble | **Seismic Slam** — cracks race through the ground, damaging, staggering and cratering as they go | **Tectonic Rupture** — reshapes the arena: shockwave, fractures, and a ring of cover left standing around you | **Rootbound** — less knockback and less physical damage on firm ground |
+| **Fire** | **Fireball** — fast ember that bursts, scorches the ground and applies burning | **Flame Wave** — fan of ground fire that ignites everything it reaches and leaves the ground alight | **Flame Dash** — lunge inside a lance of fire, burning what you pass through and leaving a burning trail | **Inferno** — a firestorm that sets the arena alight and detonates every burning creature that falls in it | **Last Ember** — fire damage rises as your health falls |
+
+### The Ultimate meter
+
+Ultimates do **not** spend aether. Each element has a separate Ultimate meter that fills by
+*fighting*: dealing damage, applying elemental status, defeating creatures, chaining hits inside a
+combo window, deflecting shots, shattering frozen targets, and using the terrain against something.
+Taking damage also contributes, but only up to a quarter of the bar, so standing in fire is never a
+charging strategy — and hitting scenery contributes nothing at all.
+
+The Ultimate becomes available the moment you restore your first shrine. It needs a **full** meter,
+spends all of it, has an eight-second lockout so it cannot be chained, never removes your control,
+never makes you invulnerable, and stays unlocked — with its current charge — across every world
+transition. Accessibility settings for reduced flashes, shake, distortion and particle density are
+in the Settings screen.
+
+### One element is a whole game
+
+Every element supports at least three distinct build directions — Water: freeze/shatter,
+healing/shields, streams and control; Fire: burning, explosions, aggression; Earth: defence, heavy
+impact, terrain control; Air: mobility, knockback, reflection — with at least ten upgrades each,
+per-element ability mutations, an Ultimate-specific epic, and a straight **+15 % affinity damage
+bonus** that Elemental Convergence does not get. Convergence stays more flexible (all four
+elements, capped at three upgrades per element) without being stronger.
+
+### Terrain deformation in combat
+
+Attacks are meant to change the arena, not leave it untouched.
+
+- **Earth** cracks and craters the ground, raises real cover and leaves a ring of pillars after a
+  Tectonic Rupture.
+- **Fire** scorches the ground, leaves burning zones that hurt anything standing in them, and melts
+  ice.
+- **Water** leaves wet ground that puts fires out, freezes into slippery ice, and crusts lava over
+  into temporary stone with a burst of steam.
+- **Air** clears smoke and steam, fans nearby fires wider, and throws creatures into terrain and
+  hazards.
+
+Every deformation goes through one place, so the rules hold everywhere: a maximum radius per strike,
+never on protected ground (shrine foundations, World Hearts, portals), a hard cap on live zones and
+temporary edits, automatic cleanup on a timer, and immediate collision updates — the density field
+*is* the collision, so a wall blocks you on the same frame it rises.
 
 ### Earth on smooth terrain
 
@@ -523,6 +577,98 @@ without it.
 
 ---
 
+## The story
+
+The worlds were once held together by four **World Hearts**. A force called the **Hollow** fractured
+the connections between them and left their keepers awake and wrong. You are a **Bound Wanderer**:
+whatever the Hearts make when they are dying, woken with whichever single current still had the
+strength to reach you.
+
+The story is told in short, skippable beats — a brief opening, a two-line introduction to each
+world, a moment before each guardian, a Heart restored, a world transition, a final reveal and a
+post-game note — plus discoverable lore fragments. Nothing takes control during a fight: a beat that
+would interrupt combat waits until it is safe.
+
+It explains, in the fiction, exactly what the systems do: why the affinity is rolled and not chosen,
+why the worlds are separated, why the creatures are corrupted, why your powers cross between worlds,
+why a *new save* wakes a new affinity, and what happens after the last guardian falls.
+
+---
+
+## Worlds
+
+Four structurally different worlds, generated from data rather than recoloured:
+
+| World | Shape | Hazard | Feel |
+| --- | --- | --- | --- |
+| **Verdant Ruins** | Rolling forest, rivers, caves, overgrown ruins | — | The opening world |
+| **Tidal Archipelago** | Islands over real depth, drowned ruins, air pockets | Drowning | Half of every arena is flooded |
+| **Ember Caldera** | Lava basin, obsidian spires, elevated stone shelves | **Lava** | Stay on the high ground |
+| **Frozen Expanse** | High snowfields over ice caverns, frozen lakes | Deep cold | Slippery, and you cannot see far |
+
+Each world defines its own terrain shape, materials, fluid level, hazard, weather, lighting, fog,
+ambience, enemy roster, structures, World Heart, guardian and exit portal.
+
+Lava hurts the instant you touch it and leaves a short burn behind, but a brief accidental contact
+is survivable, the shoreline is visibly marked, and the respawn resolver refuses to place you on a
+ledge overhanging it. Water abilities crust lava over into temporary stone.
+
+### Travelling between worlds
+
+A restored World Heart opens the world's portal. Stepping through **saves first**, then carries
+across: your affinity, Convergence state, every unlocked attack, every upgrade and chest reward,
+maximum health and Mana, regeneration, movement and damage upgrades, the Ultimate unlock *and its
+current charge*, ability mutations, inventory, permanent currency and story progress. Only the
+terrain, the shrines and your current health and Mana are new.
+
+Finishing the last world opens the **post-game**: the ending plays, you keep playing with the exact
+build you made, and the final portal offers **New Game Plus inside the same save**, which resets the
+worlds and nothing else. The affinity is rerolled **only** when you deliberately create a new save.
+
+---
+
+## Swimming and oxygen
+
+Your head under water starts an oxygen meter. It drains, the screen and audio change, and at zero
+you take periodic drowning damage — never an instant death, and always with time to reach the
+surface. Air pockets inside drowned ruins count as breathing. Water adepts drain oxygen ~40 % more
+slowly and swim faster, but no element gets unlimited air. Loading a save never drops you straight
+into a drowning: the stored oxygen is clamped and the safe-placement resolver refuses a submerged
+spot.
+
+---
+
+## Chests
+
+Chests are scattered through every world at five rarities — Common, Uncommon, Rare, Epic and
+Legendary — with the rarity fixed by the world seed, so a chest looks and rewards the same every
+time you load. Opening one plays an animation and a distinct sound, then shows a card stating the
+rarity, the exact numbers, whether the effect is **permanent for this save** or **temporary**, and
+any downside.
+
+A chest can never open into nothing: if the permanent pool for its rarity is exhausted it falls back
+to a timed blessing, and failing that to recovery, which always applies. Permanent gains are written
+to storage before you dismiss the card, and a chest can only be taken once — its lid stays open.
+
+**Double Damage** is a Legendary chest reward: damage ×2, maximum Mana −25 %, unique, and mutually
+exclusive with Glass Cannon so the two multipliers can never be stacked.
+
+---
+
+## Reward cards and tradeoffs
+
+Post-encounter cards show the reward's name, element sigil, rarity, exact numeric effects (gains in
+green, penalties in red with a warning symbol), element compatibility, stack count, synergy, how
+long it lasts, and a **before/after preview** of every stat it moves. Pick with the mouse, the
+number keys, or the arrow keys and Enter.
+
+Tradeoff cards are real decisions — "Damage ×2, but maximum health −30 %", "Cooldowns −30 %, but
+ability Mana costs +25 %", "Ultimate damage +75 %, but the meter fills 35 % more slowly". Penalties
+are never hidden, incompatible pairs are never offered together, and a stack of penalties can never
+push health, Mana, regeneration, range, sprint speed or Ultimate charge below a safe minimum.
+
+---
+
 ## Save data
 
 Everything lives in your browser's LocalStorage under two keys:
@@ -530,16 +676,36 @@ Everything lives in your browser's LocalStorage under two keys:
 - `elemental-frontier/world` — the world
 - `elemental-frontier/settings` — audio, sensitivity, FOV and all graphics settings
 
-The world save (**version 3**) holds the save-data version, world seed, elemental affinity, the
+The world save (**version 5**) holds the save-data version, world seed, elemental affinity, the
 active element for Convergence, the **world mode**, per-shrine cleansed / guardian / mote state, your
-position and view angles, respawn point, health, aether, blessings earned, carried terrain materials,
-healing items, the **terrain brush journal**, which props you have looted, playtime and tutorial
-state.
+position and view angles, respawn point and its world, health, aether, blessings earned, carried
+terrain materials, healing items, the **terrain brush journal**, which props and chests you have
+opened, playtime and tutorial state.
+
+Version 5 adds the persistent build layer: the current world, completed worlds and World Heart
+progress, every upgrade and chest reward, the Ultimate unlock and its current charge, running timed
+blessings, oxygen, story progress, the post-game flag and the New Game Plus counter.
 
 Autosave happens periodically (every 20 s), when you cleanse a shrine, gather a mote, loot a cache,
-rest, pause, change a setting, die, switch world mode, and before returning to the title screen.
+**open a chest**, **take a reward**, **defeat a guardian**, rest, pause, change a setting, die,
+switch world mode, **before leaving a world and again after arriving in the next one**, and before
+returning to the title screen.
 
-### Migration from older (block-based) saves
+Only a deliberate **New World** creates a new progression, clears the build and rerolls the
+affinity — and it asks for confirmation first. A world transition, a death, the ending and Continue
+are all explicitly *not* new games.
+
+### Migration
+
+Migration is versioned and additive: every field added in a newer version has a safe default, so an
+older save loads with everything it already had intact.
+
+- A **version 4** save keeps its seed, affinity, terrain, build, shrines, meta progression and
+  statistics, and simply starts the new persistent layer from zero. A save that had already cleansed
+  a shrine keeps its Ultimate unlocked.
+- Stored oxygen is clamped on load so a save can never drop you straight into a drowning death.
+- Unknown world ids, story beats, blessings and upgrade ids are discarded rather than failing the
+  load.
 
 A version 2 save is migrated rather than rejected:
 
@@ -595,25 +761,42 @@ elemental-frontier/
     │   ├── Renderer.ts         renderer, sky, lighting, fog, post stack, brush preview
     │   └── models.ts           every smooth 3D model in the game
     ├── player/
-    │   ├── Player.ts           movement, density collision, vitals, drowning
+    │   ├── Player.ts           movement, capsule collision, vitals, swimming
+    │   ├── collision.ts        swept capsule, depenetration, step-up, slope limit (pure)
+    │   ├── respawn.ts          validated safe-respawn resolver (pure)
+    │   ├── oxygen.ts           oxygen, drowning and swimming rules (pure)
     │   └── inventory.ts        terrain materials, healing items, quick-heal choice
     ├── elements/
     │   ├── affinity.ts         the weighted affinity roll and its rules
-    │   ├── elements.ts         element and ability definitions (data)
-    │   └── abilities.ts        runtime behaviour of all eight abilities
+    │   ├── elements.ts         element, ability and build-path definitions (data)
+    │   └── abilities.ts        runtime behaviour of all sixteen abilities
+    ├── progression/
+    │   ├── upgrades.ts         upgrades, tradeoffs, chest rewards, stat formatting
+    │   ├── rewards.ts          reward rolling and card previews
+    │   ├── chests.ts           chest rarity, contents and blessings
+    │   ├── buffs.ts            timed blessings and modifier combination
+    │   ├── ultimate.ts         the Ultimate charge meter
+    │   └── mana.ts             the Mana economy
     ├── combat/
     │   ├── Enemies.ts          creature bodies, AI, damage, drops, peaceful mode
+    │   ├── enemyTypes.ts       archetypes, body plans, weak points, elites (data)
+    │   ├── CollisionDebug.ts   F10 collision visualiser (development only)
     │   └── Projectiles.ts      pooled projectiles and deflection
     ├── fx/
     │   └── Particles.ts        pooled GPU particle system
     ├── audio/
     │   └── AudioEngine.ts      every sound, synthesised with the Web Audio API
+    ├── world/
+    │   ├── worlds.ts           the four world definitions (data)
+    │   ├── Obstacles.ts        collision volumes for everything that is not terrain
+    │   └── deformation.ts      combat terrain deformation rules and ground zones
     ├── save/
-    │   └── saveData.ts         save schema, validation, v2 migration, settings
+    │   └── saveData.ts         save schema, validation, v2-v4 migration, settings
     ├── ui/
     │   └── UI.ts               screens, HUD, compass, satchel, tutorial, overlays
     └── game/
         ├── Game.ts             state machine, main loop, system wiring
+        ├── story.ts            the World Hearts narrative beats (data)
         ├── Healing.ts          regeneration, food, potions, resting (pure)
         └── Tutorial.ts         adaptive tutorial steps
 ```
@@ -626,7 +809,21 @@ elemental-frontier/
 npm test
 ```
 
-**158 tests across five suites**, all pure logic with no WebGL requirement:
+**411 tests across ten suites**, all pure logic with no WebGL requirement:
+
+- **Respawn** — the floor search, every rejection rule (air, terrain, steepness, clearance, water,
+  scenery, creatures, hazards, world bounds), the spiral search, the validated fallback, the
+  world scan, and recovery after terrain deformation.
+- **Collision** — capsule sampling, depenetration and sliding, swept motion refusing to tunnel,
+  step-up inside and outside the step height, slope limits, ground probing, standing on obstacles,
+  the obstacle registry, and collision updating immediately after a wall is raised.
+- **Systems** — chest generation never returning nothing, Double Damage's rarity, uniqueness and
+  downside, every tradeoff showing both sides, safe minimums holding under a pile of penalties,
+  four actives per element, Ultimate charge sources and anti-spam rules, Mana regeneration and the
+  fallback cast, oxygen drain, recovery and drowning cadence, elemental terrain interactions, story
+  sequencing, world distinctness and the redesigned monsters.
+- **Save** — version 4 → 5 migration keeping everything and defaulting the new layer safely.
+
 
 - **Affinity** — total weight is exactly 11, the exact weight table, every integer roll in `0..10`
   maps to the correct affinity, boundaries, hostile random sources, a uniform sweep producing
