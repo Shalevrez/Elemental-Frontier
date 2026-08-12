@@ -43,7 +43,7 @@ import { SEA_LEVEL, WORLD_CENTER, WORLD_SIZE, inWorld } from '../world/coords';
 import { serialiseOps, clampBrush, type TerrainOp } from '../world/terrainEdits';
 import { mulberry32, randomSeed } from '../core/rng';
 import { Decals } from '../fx/Decals';
-import { buildPortal } from '../render/models';
+import { buildBeacon } from '../render/models';
 import { Weather, weatherAt } from '../fx/Weather';
 import { Telegraphs } from '../fx/Telegraphs';
 import { RunState } from '../progression/RunState';
@@ -66,6 +66,11 @@ import {
 import { BuffTracker, combineModifiers } from '../progression/buffs';
 import { CHEST_BUFFS, chestRarityLabel, rollChestOutcome, type ChestOutcome } from '../progression/chests';
 import { StoryProgress, type StoryBeat } from './story';
+import {
+  BEACON, beaconHoldFraction, beaconMode, beaconObjective, beaconPrompt,
+  createBeaconHold, placeBeacon, tickBeaconHold, worldComplete,
+  completionProgress, type BeaconWorldProbe,
+} from '../world/beacon';
 import { NG_PLUS, ngCycles } from '../world/progression';
 import {
   WORLD_ORDER, isWorldId, nextWorld, worldDef, worldIndex, type WorldId,
@@ -169,7 +174,17 @@ export class Game {
   /** Worlds whose World Heart has been restored. */
   private worldsCompleted: WorldId[] = [];
   /** Position of this world's exit portal, once the Heart is restored. */
-  private portal: { x: number; y: number; z: number; object: THREE.Object3D | null } | null = null;
+  /**
+   * The lit exit from a finished world.
+   *
+   * Rebuilt from the shrine flags on every load rather than stored, so a save
+   * finished before the Beacon existed gets one for free.
+   */
+  private beacon: {
+    x: number; y: number; z: number;
+    object: THREE.Object3D | null;
+    rings: readonly THREE.Object3D[];
+  } | null = null;
   private portalPulse = 0;
 
   /** When the next selection card is worth showing. */
@@ -189,6 +204,14 @@ export class Game {
   private coldWarn = 0;
   /** True while a world transition is in flight, so it cannot be started twice. */
   private transitioning = false;
+  /** The creature a shot hit directly, so its own blast cannot re-bill it. */
+  private lastDirectHit: Enemy | null = null;
+  /** Hold-to-travel progress at the Beacon. */
+  private readonly beaconHold = createBeaconHold();
+  /** Countdown between ambient Beacon hums. */
+  private beaconHum = 0;
+  /** Which shrine was cleansed most recently, used to site the Beacon. */
+  private lastCleansedShrine = -1;
   /** Cooldown between underwater bubble bursts. */
   private underwaterTick = 0;
   /** Current Mana bar state, shown by the HUD. */
@@ -1190,7 +1213,7 @@ export class Game {
     this.updateManaAndUltimate(dt);
     this.updateHealing(dt);
     this.handleInteractions(dt);
-    this.updatePortal(dt);
+    this.updateBeacon(dt);
 
     this.player.applyToCamera(this.renderer.camera, this.settings.reducedShake ? 0.3 : 1);
     if (this.player.headInWater && !this.settings.reducedFlashes) {
@@ -1835,35 +1858,97 @@ export class Game {
    * The portal only exists once this world's Heart is restored, and travelling
    * always saves first, so a transition can never lose progress.
    */
-  private updatePortal(dt: number): void {
-    this.ensurePortal();
-    if (!this.portal) return;
+  private updateBeacon(dt: number): void {
+    this.ensureBeacon();
+    if (!this.beacon || !this.save) return;
+
     this.portalPulse += dt;
-    if (this.portal.object) {
-      this.portal.object.rotation.y = Math.sin(this.portalPulse * 0.4) * 0.12;
-      const core = this.portal.object.children.find((c) => c.type === 'Mesh' && c.position.y > 2);
-      if (core) core.scale.setScalar(1 + Math.sin(this.portalPulse * 2.2) * 0.04);
-    }
-
-    const dx = this.player.position.x - this.portal.x;
-    const dz = this.player.position.z - this.portal.z;
-    if (dx * dx + dz * dz > 9) return;
-
-    const target = nextWorld(this.worldId);
-    const def = worldDef(this.worldId);
-    if (target) {
-      this.ui.setPrompt(`Step through the ${def.portal} to ${worldDef(target).name}`, 'E');
-      if (this.input.wasPressed('KeyE')) {
-        this.playStory(this.story.pending('world-transition'));
-        this.travelToWorld(target);
+    // The core breathes and the rings counter-rotate, so the Beacon reads as
+    // alive from any distance.
+    for (let i = 0; i < this.beacon.rings.length; i++) {
+      const node = this.beacon.rings[i]!;
+      if (i === 0) {
+        node.scale.setScalar(1 + Math.sin(this.portalPulse * 2.2) * 0.06);
+        node.rotation.y = this.portalPulse * 0.5;
+      } else {
+        node.rotation.z = this.portalPulse * (i % 2 === 0 ? 0.6 : -0.45);
       }
-    } else if (this.save && !this.save.postGame) {
-      this.ui.setPrompt('The final Heart is restored — take the last step', 'E');
-      if (this.input.wasPressed('KeyE')) this.completeCampaign();
-    } else {
-      this.ui.setPrompt(`Return to ${worldDef(WORLD_ORDER[0]!).name} and begin again, stronger`, 'E');
-      if (this.input.wasPressed('KeyE')) this.startNewGamePlus();
     }
+
+    const dx = this.player.position.x - this.beacon.x;
+    const dz = this.player.position.z - this.beacon.z;
+    const distance = Math.hypot(dx, dz);
+
+    // A quiet hum while it is in earshot, so it can be found by ear as well.
+    if (distance < BEACON.ambientRadius) {
+      this.beaconHum -= dt;
+      if (this.beaconHum <= 0) {
+        this.beaconHum = 2.6;
+        this.audio.play('pickup', Math.round(40 + distance * 6));
+      }
+    }
+
+    const mode = beaconMode(this.worldId, this.save.shrines, this.save.postGame);
+    if (mode === 'dormant') return;
+    const target = nextWorld(this.worldId);
+    const destination = worldDef(
+      mode === 'new-game-plus' ? WORLD_ORDER[0]! : (target ?? this.worldId),
+    ).name;
+
+    if (distance > BEACON.interactRadius) {
+      tickBeaconHold(this.beaconHold, dt, false, false);
+      return;
+    }
+
+    // Travelling is a deliberate hold, never a tap: brushing past the Beacon
+    // with a finger on the interact key must not take the world away.
+    const enabled = !this.transitioning;
+    tickBeaconHold(this.beaconHold, dt, this.input.isDown('KeyE'), enabled);
+    const progress = beaconHoldFraction(this.beaconHold);
+    this.ui.setPrompt(
+      enabled
+        ? beaconPrompt(mode, destination)
+        : 'The Beacon is already carrying you...',
+      'E',
+      progress,
+    );
+    if (!this.beaconHold.committed) return;
+
+    switch (mode) {
+      case 'travel':
+        if (target) {
+          this.playStory(this.story.pending('world-transition'));
+          this.travelToWorld(target);
+        }
+        break;
+      case 'finale':
+        this.completeCampaign();
+        break;
+      default:
+        // A new cycle wipes the worlds, so it is asked for explicitly.
+        this.confirmNewGamePlus();
+        break;
+    }
+  }
+
+  /** New Game Plus is a deliberate choice, so the Beacon asks first. */
+  private confirmNewGamePlus(): void {
+    // `cancelConfirm` only knows how to return to the title, the victory
+    // screen, the new-world screen or the pause menu - anything else drops the
+    // player to the title and loses their session. Pause is the safe landing
+    // spot, and it is one keypress from being back in the world.
+    this.stateBeforeConfirm = 'paused';
+    this.input.exitLock();
+    this.ui.askConfirm(
+      'Begin again, stronger?',
+      'Every world resets and the campaign starts over in '
+      + `${worldDef(WORLD_ORDER[0]!).name}. Your affinity, your build, every upgrade and `
+      + 'chest reward, your Ultimate and your inventory all carry over untouched. '
+      + 'The worlds themselves will field harder combinations.',
+      () => this.startNewGamePlus(),
+      'Begin New Game Plus',
+    );
+    this.setState('confirm');
   }
 
   private lootProp(prop: ReturnType<Props['nearest']>): void {
@@ -1944,6 +2029,7 @@ export class Game {
     this.ui.elementFlash(ELEMENTS[SHRINE_SITES[index]!.element].color, 0.5);
 
     this.save.respawn = this.safeSpotNear(this.shrines.shrines[index]!.anchor);
+    this.lastCleansedShrine = index;
     this.credit('objective');
 
     const upgradeIndex = Math.min(SHRINE_UPGRADES.length - 1, this.save.upgrades);
@@ -2054,6 +2140,10 @@ export class Game {
         _contact.set(sweep.point.x, sweep.point.y, sweep.point.z);
       }
       if (!enemy) return null;
+      // The blast that follows this impact must not charge the same creature
+      // twice: the sweep below is the direct hit, and `onProjectileImpact`
+      // skips whatever is recorded here.
+      this.lastDirectHit = enemy;
       const point = _contact;
       const kb = _v2.copy(p.vel).normalize().multiplyScalar(p.knockback ?? 0);
       const element = this.elementOfProjectile(p);
@@ -2103,6 +2193,8 @@ export class Game {
 
   private onProjectileImpact(p: Projectile, point: THREE.Vector3, hitEntity: boolean): void {
     const blast = p.blast ?? 0;
+    const direct = this.lastDirectHit;
+    this.lastDirectHit = null;
     if (p.kind === 'fireball') {
       this.audio.play('impact', 40);
       this.particles.spark({
@@ -2148,6 +2240,11 @@ export class Game {
       const shockCentre = _v1.set(point.x, point.y, point.z);
       const element = this.elementOfProjectile(p);
       for (const e of this.enemies.within(shockCentre, blast, _enemyScratch)) {
+        // A direct hit was already resolved in full against this creature,
+        // including its burning. Billing it again for the splash made a
+        // Fireball worth 145% of its stated damage against its own target -
+        // the single largest reason Fire outran the rest of the campaign.
+        if (e === direct) continue;
         const kb = _v2.copy(e.center).sub(shockCentre).normalize().multiplyScalar((p.knockback ?? 0) * 0.8);
         const amount = p.damage * (hitEntity ? 0.45 : 0.85);
         if (element) {
@@ -2509,26 +2606,65 @@ export class Game {
   // ------------------------------------------------------ world transition
 
   /** Place this world's exit portal once its World Heart is restored. */
-  private ensurePortal(): void {
-    if (this.portal || !this.save) return;
-    if (!allShrinesCleansed(this.save.shrines)) return;
+  /**
+   * Light the World Beacon once the world is finished.
+   *
+   * Reconstructed rather than stored: the condition is the same "every shrine
+   * restored" the rest of the game already uses, so a save that finished a
+   * world before the Beacon existed - or while it was unfindable - lights one
+   * the moment it loads, with no migration and nothing reset. It is idempotent,
+   * so calling it every frame costs one boolean once it is up.
+   */
+  private ensureBeacon(): void {
+    if (this.beacon || !this.save) return;
+    if (!worldComplete(this.save.shrines)) return;
 
-    const def = worldDef(this.worldId);
-    const anchor = this.safeSpotNear(_v1.set(WORLD_CENTER, 0, WORLD_CENTER));
-    const build = buildPortal(ELEMENTS[this.activeElement].color);
-    build.group.position.set(anchor[0], anchor[1], anchor[2]);
+    // Preferred anchors, in order: the Heart the player just restored, the
+    // shrine they finished last, then the centre of the world as a fallback.
+    const anchors: { x: number; z: number }[] = [
+      { x: WORLD_CENTER, z: WORLD_CENTER },
+    ];
+    const lastShrine = this.shrines.shrines[this.lastCleansedShrine];
+    if (lastShrine) {
+      anchors.unshift({ x: lastShrine.anchor.x, z: lastShrine.anchor.z });
+    }
+
+    const probe: BeaconWorldProbe = {
+      groundHeight: (x, z) => this.world.groundHeight(x, z),
+      isSolid: (x, y, z) => this.world.isSolid(x, y, z),
+      isObstacle: (x, y, z, radius, height) =>
+        this.world.obstacles.overlaps(x, y, z, radius, height),
+      fluidLevel: this.world.fluidLevel,
+      fluidIsHazard: this.world.fluidIsHazard,
+    };
+    const placed = placeBeacon(anchors, probe, WORLD_SIZE);
+    // Every candidate failed - fall back to the validated respawn resolver,
+    // which is guaranteed to return standing room somewhere.
+    const spot = placed.ok && placed.site
+      ? [placed.site.x, placed.site.y, placed.site.z] as [number, number, number]
+      : this.safeSpotNear(_v1.set(WORLD_CENTER, 0, WORLD_CENTER));
+
+    const build = buildBeacon(ELEMENTS[this.activeElement].color);
+    build.group.position.set(spot[0], spot[1], spot[2]);
     this.props.group.add(build.group);
-    this.portal = { x: anchor[0], y: anchor[1], z: anchor[2], object: build.group };
+    this.beacon = {
+      x: spot[0], y: spot[1], z: spot[2],
+      object: build.group, rings: build.animated ?? [],
+    };
 
-    // A portal is never deformable and never walk-through-able.
-    this.world.protectSphere(anchor[0], anchor[1] + 2, anchor[2], 7);
+    // Terrain play must never bury or remove the way out.
+    this.world.protectSphere(spot[0], spot[1] + 2, spot[2], BEACON.protectRadius);
     this.world.obstacles.add({
       id: this.world.obstacles.reserveId(), kind: 'portal', shape: 'cylinder',
-      x: anchor[0], y: anchor[1], z: anchor[2],
-      radius: 2.4, height: 0.4, solid: false, protectedVolume: true,
+      x: spot[0], y: spot[1], z: spot[2],
+      // The collider is the plinth only: the beam is light, not a wall.
+      radius: BEACON.baseRadius, height: BEACON.baseHeight,
+      solid: true, protectedVolume: true,
     });
 
-    this.ui.toast(`${def.portal} has opened at the heart of the world`, 'good', 5);
+    this.audio.play('shrine-cleanse');
+    this.audio.play('upgrade');
+    this.ui.toast('The World Beacon has awakened — follow the light', 'good', 6);
     this.playStory(this.story.pending('world-transition'));
   }
 
@@ -2579,7 +2715,7 @@ export class Game {
     save.runStats.worldsReached = Math.max(save.runStats.worldsReached, worldIndex(target));
 
     this.run.worldTheme = target;
-    this.portal = null;
+    this.beacon = null;
 
     if (!writeSave(window.localStorage, save)) {
       // The destination was never committed, so put the save back exactly as
@@ -2933,14 +3069,20 @@ export class Game {
 
   /** The line under the world name: what the player is meant to do next. */
   private objectiveLine(): string {
-    const cleansed = this.save?.shrines.filter(Boolean).length ?? 0;
-    if (cleansed < SHRINE_SITES.length) {
-      return `Restore the ${worldDef(this.worldId).heart.name} · ${cleansed}/${SHRINE_SITES.length} shrines`;
+    const shrines = this.save?.shrines ?? [];
+    const progress = completionProgress(shrines);
+    if (!worldComplete(shrines)) {
+      // Progress toward lighting the Beacon is stated outright, so the player
+      // always knows how much of the world is left.
+      return `Restore the ${worldDef(this.worldId).heart.name}`
+        + ` · ${progress.done}/${progress.total} shrines · the Beacon lights at ${progress.total}`;
     }
+    const mode = beaconMode(this.worldId, shrines, this.save?.postGame ?? false);
     const target = nextWorld(this.worldId);
-    if (target) return `${worldDef(this.worldId).portal} is open — travel to ${worldDef(target).name}`;
-    if (this.save?.postGame) return 'Post-game — the worlds stay open';
-    return 'The last Heart is restored — take the final step';
+    const destination = worldDef(
+      mode === 'new-game-plus' ? WORLD_ORDER[0]! : (target ?? this.worldId),
+    ).name;
+    return beaconObjective(mode, destination);
   }
 
   private updateHud(): void {
@@ -2978,6 +3120,7 @@ export class Game {
       primaryReady: primaryCd === 0 && this.abilities.affordable(this.activeElement, 'primary'),
       secondaryReady: secondaryCd === 0 && this.abilities.affordable(this.activeElement, 'secondary'),
       shrinesCleansed: this.save?.shrines.filter(Boolean).length ?? 0,
+      beacon: this.beacon ? { x: this.beacon.x, z: this.beacon.z } : null,
       yaw: this.player.yaw,
       playerX: this.player.position.x,
       playerZ: this.player.position.z,

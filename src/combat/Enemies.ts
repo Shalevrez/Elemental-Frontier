@@ -1018,9 +1018,14 @@ export class EnemyManager {
     const next = phaseAt(profile, fraction);
     if (next <= e.bossPhase) return;
 
-    e.bossPhase = next;
+    // Phase-skip protection. A single large hit can carry a guardian from full
+    // health past two thresholds at once, and the middle phase would never be
+    // seen. Advancing one step at a time guarantees every phase is shown with
+    // its own opening - and costs a strong build only the recovery windows,
+    // not invulnerability, so a good build still finishes the fight fast.
+    e.bossPhase = Math.min(next, e.bossPhase + 1);
     e.phaseChanged = true;
-    const phase = profile.phases[next]!;
+    const phase = profile.phases[e.bossPhase]!;
     e.phaseRecovery = phase.recovery;
     // Cancel whatever it was winding up: a phase change is a clean break.
     if (e.pendingAttack >= 0) {
@@ -1031,7 +1036,7 @@ export class EnemyManager {
     }
     e.attackTimer = Math.max(e.attackTimer, phase.recovery);
     e.showBar(6);
-    this.ctx.onBossPhase?.(phase.note, next);
+    this.ctx.onBossPhase?.(phase.note, e.bossPhase);
     this.ctx.particles.spark({
       count: 60, x: e.pos.x, y: e.pos.y + e.def.height * 0.6, z: e.pos.z,
       spread: e.def.radius * 1.2, jitter: 7, color: e.type.accent, color2: 0xffffff,

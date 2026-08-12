@@ -1122,6 +1122,102 @@ export function buildPortal(color: number): PropBuild {
   return { group, materials, animated: [core] };
 }
 
+/**
+ * The World Beacon: the lit exit from a finished world.
+ *
+ * Built to be found rather than stumbled upon. A grounded stone base carries a
+ * ring of standing shards; above it a tall column of light climbs far enough to
+ * be seen across the whole world, and three rings orbit the base so the thing
+ * reads as active rather than as scenery. The beam is a non-solid shell - only
+ * the base is ever collided with, and its collider matches the plinth.
+ */
+export function buildBeacon(color: number): PropBuild {
+  const group = new THREE.Group();
+  const stone = new THREE.MeshStandardMaterial({ color: 0x6b6f78, roughness: 0.9 });
+  const glow = new THREE.MeshStandardMaterial({
+    color,
+    emissive: new THREE.Color(color),
+    emissiveIntensity: 3.4,
+    roughness: 0.18,
+    transparent: true,
+    opacity: 0.85,
+  });
+  // The beam is drawn from inside as well as outside, and never writes depth,
+  // so walking against it never produces a hard edge across the screen.
+  const beamMat = new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity: 0.3,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const materials = [stone, glow, beamMat];
+
+  // ---- grounded plinth. This is the only part with a collider.
+  const plinth = new THREE.Mesh(
+    cached('beacon-plinth', () => new THREE.CylinderGeometry(1.9, 2.3, 1.1, 20)), stone,
+  );
+  plinth.position.y = 0.55;
+  plinth.castShadow = true;
+  plinth.receiveShadow = true;
+  group.add(plinth);
+
+  // ---- standing shards around the rim.
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2;
+    const shard = new THREE.Mesh(
+      cached('beacon-shard', () => new THREE.ConeGeometry(0.26, 1.7, 5)), stone,
+    );
+    shard.position.set(Math.cos(a) * 1.55, 1.6, Math.sin(a) * 1.55);
+    shard.rotation.z = Math.cos(a) * 0.16;
+    shard.rotation.x = -Math.sin(a) * 0.16;
+    shard.castShadow = true;
+    group.add(shard);
+  }
+
+  // ---- the core the beam springs from.
+  const core = new THREE.Mesh(
+    cached('beacon-core', () => new THREE.IcosahedronGeometry(0.78, 1)), glow,
+  );
+  core.position.y = 2.3;
+  group.add(core);
+
+  // ---- the beam: tall, soft and non-solid.
+  const beam = new THREE.Mesh(
+    cached('beacon-beam', () => new THREE.CylinderGeometry(0.85, 1.5, BEAM_HEIGHT, 14, 1, true)),
+    beamMat,
+  );
+  beam.position.y = BEAM_HEIGHT / 2 + 1.4;
+  beam.renderOrder = 3;
+  group.add(beam);
+
+  const innerBeam = new THREE.Mesh(
+    cached('beacon-beam-inner', () => new THREE.CylinderGeometry(0.34, 0.5, BEAM_HEIGHT, 10, 1, true)),
+    beamMat,
+  );
+  innerBeam.position.y = BEAM_HEIGHT / 2 + 1.4;
+  innerBeam.renderOrder = 4;
+  group.add(innerBeam);
+
+  // ---- orbiting rings, animated by the game loop.
+  const rings: THREE.Object3D[] = [];
+  for (let i = 0; i < 3; i++) {
+    const ring = new THREE.Mesh(
+      cached(`beacon-ring-${i}`, () => new THREE.TorusGeometry(2.2 + i * 0.5, 0.07, 8, 30)), glow,
+    );
+    ring.position.y = 1.5 + i * 0.9;
+    ring.rotation.x = Math.PI / 2;
+    group.add(ring);
+    rings.push(ring);
+  }
+
+  return { group, materials, animated: [core, ...rings] };
+}
+
+/** How far the Beacon's light climbs. Matches `BEACON.beamHeight`. */
+const BEAM_HEIGHT = 90;
+
 /** A ritual mote: the peaceful-mode objective pickup. */
 export function buildMote(color: number): PropBuild {
   const group = new THREE.Group();

@@ -431,6 +431,14 @@
       <div id="toasts"></div>
 
       <div id="fps" class="hidden"></div>
+
+      <!--
+        Running build identity. Filled in from the compiled bundle by
+        src/core/version.ts, never from a separate fetch, so what it says is
+        always what is actually executing. Sits outside #app's screens so it
+        survives every state, including the title and the recovery screens.
+      -->
+      <div id="build-version" aria-live="off"></div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

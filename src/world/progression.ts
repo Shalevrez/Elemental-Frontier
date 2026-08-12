@@ -67,14 +67,19 @@ export interface WorldProfile {
 }
 
 export const WORLD_PROFILES: Readonly<Record<WorldId, WorldProfile>> = Object.freeze({
-  // Teaches. One idea at a time: a melee role, a ranged role, and enough room
-  // to see both. No hazard, few elites, and the smallest budget in the game.
+  // Teaches - but teaching is not the same as being free. Production feedback
+  // had the whole world finished in about five minutes, so the budget and the
+  // elite rate come up while the shape stays the same: still the fewest roles
+  // at once, still the most room, still no hazard, and still the gentlest
+  // world in the campaign by every measure.
   wilds: Object.freeze({
     intent: 'Teaches the fundamentals with readable, separable roles.',
     rangedShare: 0.3,
     heavyShare: 0.35,
-    eliteScale: 0.6,
-    budgetScale: 0.85,
+    // Elites are the escalation the first world was missing entirely: at 0.6
+    // a player could cross it without meeting one.
+    eliteScale: 0.85,
+    budgetScale: 1,
     signatureBias: 0.3,
     hazardScale: 0,
     tokenBonus: 0,
@@ -401,7 +406,12 @@ function phases(openNote: string, peakNote: string, cadence: [number, number, nu
 export const GUARDIAN_PROFILES: Readonly<Record<WorldId, GuardianProfile>> = Object.freeze({
   wilds: Object.freeze({
     name: 'The Rootwarden',
-    healthScale: 0.82,
+    // Raised from 0.82. At the old value a focused Fire adept removed the
+    // Rootwarden in roughly twelve seconds - before its second phase, let
+    // alone its third - which is what made the first world a five-minute
+    // world. The rest of the increase comes from the guardian's own base
+    // health, so this stays the least durable guardian in the campaign.
+    healthScale: 0.95,
     speedScale: 0.92,
     // The first guardian is the tutorial's exam: it telegraphs generously and
     // never speeds up past the point where its wind-ups can be read.

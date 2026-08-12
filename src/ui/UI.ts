@@ -74,6 +74,8 @@ export interface HudState {
   shrinesCleansed: number;
   yaw: number;
   playerX: number;
+  /** Where the lit World Beacon stands, or null while the world is unfinished. */
+  beacon: { x: number; z: number } | null;
   playerZ: number;
   shrineFlags: readonly boolean[];
   passive: string | null;
@@ -175,6 +177,8 @@ export class UI {
   private flashTimer = 0;
   private healFlashTimer = 0;
   private compassMarks: HTMLElement[] = [];
+  /** The compass mark for the World Beacon, shown once a world is finished. */
+  private beaconMark: HTMLElement | null = null;
   private lastMaterialSignature = '';
   private lastItemSignature = '';
   private tutorialSteps: TutorialStep[] = [];
@@ -695,6 +699,14 @@ export class UI {
       marks.appendChild(node);
       this.compassMarks.push(node);
     }
+    // The Beacon gets its own mark. Without one, a finished world showed four
+    // marks all reading "cleansed" and nothing at all pointing at the exit.
+    const beacon = document.createElement('div');
+    beacon.className = 'compass-mark beacon';
+    beacon.innerHTML = '<svg class="ico"><use href="#sym-shrine" /></svg><em>beacon</em>';
+    beacon.style.display = 'none';
+    marks.appendChild(beacon);
+    this.beaconMark = beacon;
   }
 
   private updateCompass(state: HudState): void {
@@ -734,6 +746,25 @@ export class UI {
       const label = done ? 'cleansed' : dist < 30 ? 'close' : dist < 80 ? 'nearby' : 'far';
       node.querySelector('em')!.textContent = label;
     }
+
+    // ---- the Beacon, once it is lit.
+    const mark = this.beaconMark;
+    if (!mark) return;
+    if (!state.beacon) {
+      mark.style.display = 'none';
+      return;
+    }
+    const bdx = state.beacon.x - state.playerX;
+    const bdz = state.beacon.z - state.playerZ;
+    const brel = normaliseAngle(Math.atan2(bdx, -bdz) + state.yaw);
+    if (Math.abs(brel) > halfFov) {
+      mark.style.display = 'none';
+      return;
+    }
+    mark.style.display = '';
+    mark.style.left = `${50 + (brel / halfFov) * 50}%`;
+    const bdist = Math.round(Math.hypot(bdx, bdz));
+    mark.querySelector('em')!.textContent = bdist < 6 ? 'here' : `${bdist}m`;
   }
 
   // -------------------------------------------------------------- prompts

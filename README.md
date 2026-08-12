@@ -754,6 +754,48 @@ worlds and nothing else. The affinity is rerolled **only** when you deliberately
 ---
 
 
+### Finishing a world: the World Beacon
+
+Restore all four shrines and the **World Beacon** lights. It is a grounded
+stone plinth under a column of light ninety metres tall — visible across the
+whole world — and it is the deliberate way onward.
+
+- It appears beside the shrine you finished last, or at the centre of the world
+  if that ground is unsuitable. Placement is validated for level, dry, open
+  ground with headroom, well clear of water, lava, props and cliffs, and it is
+  deterministic, so it stands in the same place every time you load.
+- It is marked on the **compass** with its distance in metres, and named in the
+  **objective line**. Before it lights, the objective shows your progress
+  toward it (`2/4 shrines · the Beacon lights at 4`).
+- Terrain deformation cannot bury or remove it: the ground around it is
+  protected. Only the plinth is solid; the beam is light.
+- Walk up and **hold `E`** to travel. It is a hold, not a tap, so brushing past
+  it with a finger on the interact key never takes the world away.
+
+In the last world the Beacon leads to the ending instead, and after the
+campaign it offers New Game Plus — with an explicit confirmation first.
+
+**Everything comes with you:** affinity, Convergence state, active element,
+every ability, every upgrade, chest rewards, tradeoffs, Mana upgrades, the
+Ultimate unlock *and its charge*, maximum health, inventory, permanent
+currency, story progress, completed worlds, New Game Plus count and world mode.
+Travelling saves before it leaves and again only once the destination has
+successfully built; if either step fails, the previous save is restored and you
+stay where you are with a readable message rather than a black screen.
+
+A save that finished a world before the Beacon existed lights one the moment it
+loads. Nothing is reset, no guardian has to be fought again, and no reward,
+chest or affinity is rerolled — the Beacon is reconstructed from the shrine
+flags the save already had, so there is no migration.
+
+### First-world pacing
+
+Verdant Ruins teaches, but it is no longer a five-minute world. Expect roughly
+**15–25 minutes** for an experienced player and **20–35** for a new one. The
+increase is in resistance, not in padding: a fuller encounter budget, an elite
+rate that actually produces an escalation, and a Rootwarden durable enough to
+reach its second and third phases. There is no minimum timer anywhere.
+
 ### How the four worlds differ mechanically
 
 They were always shaped differently - real islands, a real lava basin, a real
@@ -892,6 +934,34 @@ push health, Mana, regeneration, range, sprint speed or Ultimate charge below a 
 
 ---
 
+## Build version
+
+The running build is shown in the bottom-right corner of the screen, on the
+title, in play, in the pause menu, on the Continue screen and on the error
+screen:
+
+```text
+v1.0.1 • edc3c99
+```
+
+Hovering it — or reading it with a screen reader — gives the longer form:
+
+```text
+Built 2026-08-12 14:30 UTC • production
+```
+
+The version is **compiled into the JavaScript bundle** by Vite's `define` at
+build time, never fetched. That is deliberate: a version read from a separate
+file could be served from a different cache than the code that read it, which
+is exactly the confusion the label exists to end. After a deploy, comparing the
+label with the commit tells you whether the new build is live.
+
+`package.json` is the source of truth for the semantic version. The commit
+comes from the CI provider when one is present (`COMMIT_REF`,
+`VERCEL_GIT_COMMIT_SHA`, `GITHUB_SHA`, `CF_PAGES_COMMIT_SHA`), otherwise from
+`git rev-parse`. A local `npm run dev` build reads `v1.0.1 • dev`, which says
+plainly that it is not a deployed bundle. Only the short commit is ever shown.
+
 ## Save data
 
 Everything lives in your browser's LocalStorage under two keys:
@@ -1017,6 +1087,7 @@ elemental-frontier/
     ├── world/
     │   ├── worlds.ts           the four world definitions (data)
     │   ├── progression.ts      world difficulty profiles, guardians, NG+ (pure)
+    │   ├── beacon.ts           World Beacon placement, mode and hold (pure)
     │   ├── Obstacles.ts        collision volumes for everything that is not terrain
     │   └── deformation.ts      combat terrain deformation rules and ground zones
     ├── save/

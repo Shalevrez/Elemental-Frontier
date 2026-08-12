@@ -6,6 +6,24 @@
 
 import './style.css';
 import { Game } from './game/Game';
+import { BUILD, versionDetail, versionLabel } from './core/version';
+
+/**
+ * Stamp the running build into the corner of the screen.
+ *
+ * Done before anything else can fail, so the label is present even on the
+ * error screen - which is exactly when knowing the build matters most.
+ */
+function showVersion(): void {
+  const node = document.getElementById('build-version');
+  if (!node) return;
+  node.textContent = versionLabel();
+  // The longer form is available on hover and to a screen reader without
+  // cluttering the corner.
+  node.title = versionDetail();
+  node.setAttribute('aria-label', `${versionLabel()}. ${versionDetail()}`);
+  node.dataset.mode = BUILD.mode;
+}
 
 function fail(message: string, detail?: unknown): void {
   // eslint-disable-next-line no-console
@@ -24,6 +42,7 @@ function fail(message: string, detail?: unknown): void {
 }
 
 function boot(): void {
+  showVersion();
   const canvas = document.getElementById('scene');
   if (!(canvas instanceof HTMLCanvasElement)) {
     fail('The rendering canvas is missing from the page.');

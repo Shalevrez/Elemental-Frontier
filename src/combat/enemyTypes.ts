@@ -474,7 +474,7 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
 
   guardian: ed({
     kind: 'guardian', name: 'Shrine Guardian', role: 'boss', tier: 'guardian', locomotion: 'ground',
-    maxHealth: 460, speed: 2.8, detectRange: 34, loseRange: 70,
+    maxHealth: 560, speed: 2.8, detectRange: 34, loseRange: 70,
     radius: 1.1, height: 4.0, knockbackResist: 0.9, energyDrop: 60, standoff: 0,
     attacks: [
       atk({

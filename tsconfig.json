@@ -21,5 +21,5 @@
     "exactOptionalPropertyTypes": false,
     "types": ["vite/client"]
   },
-  "include": ["src", "tests", "vite.config.ts", "vitest.config.ts"]
+  "include": ["src", "tests", "build-env.d.ts", "vite.config.ts", "vitest.config.ts"]
 }
