@@ -80,6 +80,40 @@ export interface StatModifiers {
   lifesteal: number;
   /** Multiplies knockback the player applies. */
   knockback: number;
+
+  // ---- added with the tradeoff / chest layer
+  /** Multiplies maximum health (tradeoff penalties use this). */
+  maxHealthScale: number;
+  /** Multiplies maximum aether. */
+  maxEnergyScale: number;
+  /** Multiplies aether regeneration. */
+  regenScale: number;
+  /** Multiplies the radius of area effects. */
+  areaScale: number;
+  /** Multiplies damage of a *direct* hit (not the splash). */
+  directScale: number;
+  /** Multiplies damage of non-critical hits only. */
+  normalHitScale: number;
+  /** Multiplies how far attacks reach. */
+  rangeScale: number;
+  /** Multiplies the aim-assist cone (1 = normal, 0 = no assistance). */
+  aimAssistScale: number;
+  /** Multiplies Ultimate damage. */
+  ultimateDamage: number;
+  /** Multiplies how fast the Ultimate meter fills. */
+  ultimateGain: number;
+  /** Multiplies sprint speed only. */
+  sprintScale: number;
+  /** Extra seconds of lung capacity. */
+  oxygenCapacity: number;
+  /** Multiplies how fast oxygen drains (lower is better). */
+  oxygenDrain: number;
+  /** Flat aether returned on a damaging hit. */
+  manaOnHit: number;
+  /** Flat aether returned when a creature is defeated. */
+  manaOnKill: number;
+  /** Multiplies the strength of status effects the player applies. */
+  statusPower: number;
 }
 
 export const BASE_MODIFIERS: Readonly<StatModifiers> = Object.freeze({
@@ -102,6 +136,22 @@ export const BASE_MODIFIERS: Readonly<StatModifiers> = Object.freeze({
   armor: 0,
   lifesteal: 0,
   knockback: 1,
+  maxHealthScale: 1,
+  maxEnergyScale: 1,
+  regenScale: 1,
+  areaScale: 1,
+  directScale: 1,
+  normalHitScale: 1,
+  rangeScale: 1,
+  aimAssistScale: 1,
+  ultimateDamage: 1,
+  ultimateGain: 1,
+  sprintScale: 1,
+  oxygenCapacity: 0,
+  oxygenDrain: 1,
+  manaOnHit: 0,
+  manaOnKill: 0,
+  statusPower: 1,
 });
 
 /** Which stats combine by multiplication rather than addition. */
@@ -109,6 +159,9 @@ const MULTIPLICATIVE: readonly (keyof StatModifiers)[] = [
   'damageScale', 'fireScale', 'waterScale', 'earthScale', 'airScale',
   'cooldownScale', 'costScale', 'moveScale', 'projectileSpeed', 'projectileSize',
   'statusDuration', 'knockback',
+  'maxHealthScale', 'maxEnergyScale', 'regenScale', 'areaScale', 'directScale',
+  'normalHitScale', 'rangeScale', 'aimAssistScale', 'ultimateDamage', 'ultimateGain',
+  'sprintScale', 'oxygenDrain', 'statusPower',
 ];
 
 export interface UpgradeDef {
@@ -133,6 +186,19 @@ export interface UpgradeDef {
   readonly synergy?: readonly string[];
   /** Meta-unlock id required before this can appear in the pool. */
   readonly unlock?: string;
+  /**
+   * Where this upgrade comes from.
+   *
+   *  `reward` (the default) appears on post-encounter selection cards,
+   *  `chest`  is only ever granted by opening a chest.
+   */
+  readonly source?: 'reward' | 'chest';
+  /** True when the upgrade carries a deliberate downside. */
+  readonly tradeoff?: boolean;
+  /** How long the effect lasts. Chest buffs override this at runtime. */
+  readonly permanence?: 'save' | 'world' | 'temporary';
+  /** Short, explicit warning shown with a caution symbol. */
+  readonly warning?: string;
 }
 
 function up(d: UpgradeDef): UpgradeDef {
@@ -431,9 +497,396 @@ const GENERIC: UpgradeDef[] = [
   }),
 ];
 
+// =====================================================================
+//  Deep single-element paths
+//
+//  Every element supports at least three build directions on its own, so a
+//  focused adept has as much long-term growth as a Convergence vessel. These
+//  fill out the directions the base sets only hinted at.
+// =====================================================================
+
+const DEPTH: UpgradeDef[] = [
+  // ---- WATER: freeze/shatter, healing/shields, streams & control
+  up({
+    id: 'water-mending-tide', name: 'Mending Tide', rarity: 'uncommon', element: 'water',
+    description: 'Freezing or soaking a creature knits a little of you back together.',
+    tags: ['healing'], grants: ['mend-on-status'], maxStacks: 3,
+    stats: { manaOnHit: 1.2 }, hooks: ['onStatusApplied'], synergy: ['sustain', 'barriers'],
+  }),
+  up({
+    id: 'water-torrent', name: 'Torrent', rarity: 'rare', element: 'water',
+    description: 'Water Whip widens into a torrent that sweeps several targets at once.',
+    tags: ['chaining', 'control'], grants: ['whip-wide'], maxStacks: 2,
+    stats: { areaScale: 1.2 }, hooks: ['onAbilityCast'], synergy: ['multi-hit'],
+  }),
+  up({
+    id: 'water-undertow', name: 'Undertow', rarity: 'uncommon', element: 'water',
+    description: 'Tidal Pull drags harder and holds creatures in place for longer.',
+    tags: ['control'], grants: ['pull-strength'], maxStacks: 3,
+    stats: { statusPower: 1.2 }, synergy: ['control'],
+  }),
+  up({
+    id: 'water-maelstrom-heart', name: 'Maelstrom Heart', rarity: 'epic', element: 'water',
+    description: 'Maelstrom lasts longer and freezes anything it has soaked enough.',
+    tags: ['freezing', 'ultimate'], grants: ['ultimate-water'], maxStacks: 1,
+    stats: { ultimateDamage: 1.25 }, synergy: ['freezing'],
+  }),
+
+  // ---- FIRE: burning, explosions, aggression
+  up({
+    id: 'fire-wildfire', name: 'Wildfire', rarity: 'uncommon', element: 'fire',
+    description: 'Burning spreads from a burning creature to anything that touches it.',
+    tags: ['burning'], grants: ['burn-contagion'], maxStacks: 2,
+    stats: { statusPower: 1.18 }, hooks: ['onStatusApplied'], synergy: ['burning'],
+  }),
+  up({
+    id: 'fire-blast-core', name: 'Blast Core', rarity: 'rare', element: 'fire',
+    description: 'Every fire explosion is wider and hits harder at its edge.',
+    tags: ['explosions'], grants: ['blast-core'], maxStacks: 3,
+    stats: { areaScale: 1.16 }, synergy: ['explosions'],
+  }),
+  up({
+    id: 'fire-quickdraw', name: 'Quickdraw', rarity: 'common', element: 'fire',
+    description: 'Fireball and Flame Wave come back faster.',
+    tags: ['rapid'], maxStacks: 4, stats: { cooldownScale: 0.91 }, synergy: ['rapid'],
+  }),
+  up({
+    id: 'fire-inferno-heart', name: 'Inferno Heart', rarity: 'epic', element: 'fire',
+    description: 'Inferno burns for longer and detonates the creatures it kills.',
+    tags: ['burning', 'ultimate'], grants: ['ultimate-fire'], maxStacks: 1,
+    stats: { ultimateDamage: 1.25 }, synergy: ['explosions'],
+  }),
+
+  // ---- EARTH: defence, impact, terrain control
+  up({
+    id: 'earth-bulwark-stance', name: 'Bulwark Stance', rarity: 'uncommon', element: 'earth',
+    description: 'Standing on stone or soil hardens you further.',
+    tags: ['armor'], grants: ['ground-armor'], maxStacks: 3,
+    stats: { armor: 0.06 }, synergy: ['armor'],
+  }),
+  up({
+    id: 'earth-quake-step', name: 'Quakestep', rarity: 'rare', element: 'earth',
+    description: 'Seismic Slam cracks a wider area and staggers for longer.',
+    tags: ['stun', 'terrain'], grants: ['slam-wide'], maxStacks: 2,
+    stats: { areaScale: 1.22, statusPower: 1.15 }, synergy: ['impact'],
+  }),
+  up({
+    id: 'earth-terraformer', name: 'Terraformer', rarity: 'uncommon', element: 'earth',
+    description: 'Earth abilities reshape more ground and leave it standing longer.',
+    tags: ['terrain', 'structures'], grants: ['deform-strength'], maxStacks: 3,
+    synergy: ['structures'],
+  }),
+  up({
+    id: 'earth-tectonic-heart', name: 'Tectonic Heart', rarity: 'epic', element: 'earth',
+    description: 'Tectonic Rupture raises more cover and shakes a wider arena.',
+    tags: ['terrain', 'ultimate'], grants: ['ultimate-earth'], maxStacks: 1,
+    stats: { ultimateDamage: 1.25 }, synergy: ['structures'],
+  }),
+
+  // ---- AIR: mobility, knockback, reflection
+  up({
+    id: 'air-slipstream', name: 'Slipstream', rarity: 'common', element: 'air',
+    description: 'Sprinting and dashing are faster, and dashes recover sooner.',
+    tags: ['mobility', 'speed'], maxStacks: 4,
+    stats: { sprintScale: 1.08, cooldownScale: 0.94 }, synergy: ['mobility'],
+  }),
+  up({
+    id: 'air-hurricane', name: 'Hurricane', rarity: 'rare', element: 'air',
+    description: 'Anything blown into terrain or a hazard takes heavy impact damage.',
+    tags: ['knockback'], grants: ['hazard-slam'], maxStacks: 2,
+    stats: { knockback: 1.2 }, hooks: ['onEnemyDamaged'], synergy: ['knockback'],
+  }),
+  up({
+    id: 'air-blade-storm', name: 'Blade Storm', rarity: 'uncommon', element: 'air',
+    description: 'Air Blades releases two extra blades and they ricochet once more.',
+    tags: ['multi-hit', 'reflection'], grants: ['extra-blade'], maxStacks: 3,
+    synergy: ['multi-hit'],
+  }),
+  up({
+    id: 'air-cyclone-heart', name: 'Cyclone Heart', rarity: 'epic', element: 'air',
+    description: 'Cyclone travels further, pulls harder and hurls back more projectiles.',
+    tags: ['control', 'ultimate'], grants: ['ultimate-air'], maxStacks: 1,
+    stats: { ultimateDamage: 1.25 }, synergy: ['reflection'],
+  }),
+
+  // ---- Ability mutations: rare, behaviour-changing, element-specific
+  up({
+    id: 'mut-frozen-core', name: 'Mutation · Frozen Core', rarity: 'rare', element: 'water',
+    description: 'Water Whip fires a shard of ice that pierces the first creature it hits.',
+    tags: ['mutation', 'freezing'], grants: ['mutate-whip-shard'], maxStacks: 1,
+    hooks: ['onAbilityCast'], synergy: ['freezing'],
+  }),
+  up({
+    id: 'mut-emberfall', name: 'Mutation · Emberfall', rarity: 'rare', element: 'fire',
+    description: 'Fireball rains three embers down on impact instead of one burst.',
+    tags: ['mutation', 'explosions'], grants: ['mutate-ember-rain'], maxStacks: 1,
+    hooks: ['onProjectileHit'], synergy: ['explosions'],
+  }),
+  up({
+    id: 'mut-stonefall', name: 'Mutation · Stonefall', rarity: 'rare', element: 'earth',
+    description: 'Rock Shot arcs high and lands as a crater instead of flying flat.',
+    tags: ['mutation', 'heavy'], grants: ['mutate-mortar'], maxStacks: 1,
+    hooks: ['onAbilityCast'], synergy: ['impact'],
+  }),
+  up({
+    id: 'mut-shearwind', name: 'Mutation · Shearwind', rarity: 'rare', element: 'air',
+    description: 'Gust becomes a narrow lance that pierces everything in a line.',
+    tags: ['mutation', 'multi-hit'], grants: ['mutate-gust-lance'], maxStacks: 1,
+    hooks: ['onAbilityCast'], synergy: ['multi-hit'],
+  }),
+
+  // ---- Mana and oxygen support, available to everybody
+  up({
+    id: 'any-wellspring', name: 'Wellspring', rarity: 'uncommon', element: 'any',
+    description: 'Damaging a creature returns a little Mana.',
+    tags: ['sustain', 'mana'], maxStacks: 4, stats: { manaOnHit: 1.6 }, synergy: ['sustain'],
+  }),
+  up({
+    id: 'any-reclaim', name: 'Reclaim', rarity: 'uncommon', element: 'any',
+    description: 'Defeating a creature returns Mana.',
+    tags: ['sustain', 'mana'], maxStacks: 4, stats: { manaOnKill: 8 }, synergy: ['sustain'],
+  }),
+  up({
+    id: 'any-second-breath', name: 'Second Breath', rarity: 'common', element: 'any',
+    description: 'Hold your breath for much longer, and use it more slowly.',
+    tags: ['sustain'], maxStacks: 3, stats: { oxygenCapacity: 8, oxygenDrain: 0.88 },
+  }),
+  up({
+    id: 'any-perfect-step', name: 'Perfect Step', rarity: 'rare', element: 'any',
+    description: 'Dodging an attack at the last moment refunds Mana and charges the Ultimate.',
+    tags: ['mobility', 'mana'], grants: ['perfect-dodge'], maxStacks: 2,
+    hooks: ['onPlayerDamaged'], synergy: ['mobility'],
+  }),
+  up({
+    id: 'any-ascendant', name: 'Ascendant', rarity: 'uncommon', element: 'any',
+    description: 'The Ultimate meter fills noticeably faster.',
+    tags: ['ultimate'], maxStacks: 3, stats: { ultimateGain: 1.18 }, synergy: ['ultimate'],
+  }),
+];
+
+// =====================================================================
+//  Tradeoff cards
+//
+//  Every one of these is a real decision: a clear, sizeable benefit paid for
+//  with a clear, sizeable cost. The card UI reads the numbers straight out of
+//  `stats`, so a penalty can never be hidden from the player.
+// =====================================================================
+
+const TRADEOFFS: UpgradeDef[] = [
+  up({
+    id: 'trade-glass-cannon', name: 'Glass Cannon', rarity: 'epic', element: 'any',
+    description: 'Damage ×2, but maximum health is reduced by 30%.',
+    tags: ['power', 'tradeoff'], maxStacks: 1, tradeoff: true,
+    warning: 'You will die in far fewer hits.',
+    stats: { damageScale: 2, maxHealthScale: 0.7 },
+    incompatible: ['chest-double-damage'], synergy: ['risk'],
+  }),
+  up({
+    id: 'trade-reckless-speed', name: 'Reckless Sprint', rarity: 'uncommon', element: 'any',
+    description: 'Movement speed +35%, but aim assistance is reduced by 60%.',
+    tags: ['speed', 'tradeoff'], maxStacks: 1, tradeoff: true,
+    warning: 'Shots no longer bend toward a target.',
+    stats: { moveScale: 1.35, aimAssistScale: 0.4 }, synergy: ['speed', 'risk'],
+  }),
+  up({
+    id: 'trade-swift-well', name: 'Swift Well', rarity: 'uncommon', element: 'any',
+    description: 'Mana regeneration +60%, but maximum Mana is reduced by 20%.',
+    tags: ['mana', 'tradeoff'], maxStacks: 2, tradeoff: true,
+    stats: { regenScale: 1.6, maxEnergyScale: 0.8 },
+    incompatible: ['trade-deep-reserve'], synergy: ['sustain', 'risk'],
+  }),
+  up({
+    id: 'trade-deep-reserve', name: 'Deep Reserve', rarity: 'uncommon', element: 'any',
+    description: 'Maximum Mana +50%, but movement speed is reduced by 10%.',
+    tags: ['mana', 'tradeoff'], maxStacks: 2, tradeoff: true,
+    stats: { maxEnergyScale: 1.5, moveScale: 0.9 },
+    incompatible: ['trade-swift-well'], synergy: ['sustain', 'risk'],
+  }),
+  up({
+    id: 'trade-haste-tax', name: 'Hasty Casting', rarity: 'rare', element: 'any',
+    description: 'Cooldowns −30%, but ability Mana costs +25%.',
+    tags: ['power', 'tradeoff'], maxStacks: 1, tradeoff: true,
+    stats: { cooldownScale: 0.7, costScale: 1.25 },
+    incompatible: ['any-overcharge'], synergy: ['rapid', 'risk'],
+  }),
+  up({
+    id: 'trade-precision', name: 'Executioner', rarity: 'rare', element: 'any',
+    description: 'Critical chance +25%, but normal hits deal 15% less damage.',
+    tags: ['critical', 'tradeoff'], maxStacks: 1, tradeoff: true,
+    stats: { critChance: 0.25, normalHitScale: 0.85 }, synergy: ['critical', 'risk'],
+  }),
+  up({
+    id: 'trade-wide-blast', name: 'Wide Detonation', rarity: 'uncommon', element: 'any',
+    description: 'Area of effect +40%, but direct-hit damage is reduced by 20%.',
+    tags: ['explosions', 'tradeoff'], maxStacks: 2, tradeoff: true,
+    stats: { areaScale: 1.4, directScale: 0.8 }, synergy: ['explosions', 'risk'],
+  }),
+  up({
+    id: 'trade-pyre-focus', name: 'Pyre Focus', rarity: 'rare', element: 'fire',
+    description: 'Burning is 45% stronger, but attack range is reduced by 25%.',
+    tags: ['burning', 'tradeoff'], maxStacks: 1, tradeoff: true,
+    warning: 'You must fight much closer in.',
+    stats: { statusPower: 1.45, rangeScale: 0.75 }, synergy: ['burning', 'risk'],
+  }),
+  up({
+    id: 'trade-deep-freeze', name: 'Deep Freeze', rarity: 'rare', element: 'water',
+    description: 'Freezing lasts 40% longer, but Mana regeneration is reduced by 25%.',
+    tags: ['freezing', 'tradeoff'], maxStacks: 1, tradeoff: true,
+    stats: { statusDuration: 1.4, regenScale: 0.75 }, synergy: ['freezing', 'risk'],
+  }),
+  up({
+    id: 'trade-bedrock', name: 'Bedrock', rarity: 'rare', element: 'earth',
+    description: 'Damage taken −18%, but sprint speed is reduced by 20%.',
+    tags: ['armor', 'tradeoff'], maxStacks: 1, tradeoff: true,
+    stats: { armor: 0.18, sprintScale: 0.8 }, synergy: ['armor', 'risk'],
+  }),
+  up({
+    id: 'trade-updraft', name: 'Updraft', rarity: 'rare', element: 'air',
+    description: 'Movement speed +20% and Air damage +20%, but damage taken +15%.',
+    tags: ['mobility', 'tradeoff'], maxStacks: 1, tradeoff: true,
+    warning: 'Nothing softens a hit any more.',
+    stats: { moveScale: 1.2, airScale: 1.2, armor: -0.15 }, synergy: ['mobility', 'risk'],
+  }),
+  up({
+    id: 'trade-slow-thunder', name: 'Slow Thunder', rarity: 'epic', element: 'any',
+    description: 'Ultimate damage +75%, but the Ultimate meter fills 35% more slowly.',
+    tags: ['ultimate', 'tradeoff'], maxStacks: 1, tradeoff: true,
+    stats: { ultimateDamage: 1.75, ultimateGain: 0.65 }, synergy: ['ultimate', 'risk'],
+  }),
+];
+
+// =====================================================================
+//  Chest-only rewards
+//
+//  These never appear on a selection card. They are what a chest can contain,
+//  and they carry the heaviest single effects in the game - Double Damage most
+//  of all, which is legendary, unique, and paid for with a real downside.
+// =====================================================================
+
+const CHEST_UPGRADES: UpgradeDef[] = [
+  up({
+    id: 'chest-double-damage', name: 'Double Damage', rarity: 'legendary', element: 'any',
+    description: 'Damage ×2, but maximum Mana is reduced by 25%.',
+    tags: ['power', 'tradeoff'], grants: ['double-damage'], maxStacks: 1,
+    source: 'chest', tradeoff: true, permanence: 'save',
+    warning: 'Unique. It cannot be taken twice, and it thins your Mana pool.',
+    stats: { damageScale: 2, maxEnergyScale: 0.75 },
+    incompatible: ['trade-glass-cannon'], synergy: ['risk'],
+  }),
+  up({
+    id: 'chest-vital-surge', name: 'Vital Surge', rarity: 'rare', element: 'any',
+    description: 'Maximum health +40.',
+    tags: ['sustain'], maxStacks: 6, source: 'chest', permanence: 'save',
+    stats: { maxHealth: 40 },
+  }),
+  up({
+    id: 'chest-mana-font', name: 'Mana Font', rarity: 'rare', element: 'any',
+    description: 'Maximum Mana +35 and regeneration +2/s.',
+    tags: ['mana'], maxStacks: 6, source: 'chest', permanence: 'save',
+    stats: { maxEnergy: 35, energyRegen: 2 },
+  }),
+  up({
+    id: 'chest-fleetfoot', name: 'Fleetfoot', rarity: 'uncommon', element: 'any',
+    description: 'Movement speed +10%.',
+    tags: ['speed'], maxStacks: 4, source: 'chest', permanence: 'save',
+    stats: { moveScale: 1.1 },
+  }),
+  up({
+    id: 'chest-swift-hands', name: 'Swift Hands', rarity: 'uncommon', element: 'any',
+    description: 'Cooldowns −12%.',
+    tags: ['rapid'], maxStacks: 4, source: 'chest', permanence: 'save',
+    stats: { cooldownScale: 0.88 },
+  }),
+  up({
+    id: 'chest-frugal', name: 'Frugal Casting', rarity: 'uncommon', element: 'any',
+    description: 'Ability Mana costs −12%.',
+    tags: ['mana'], maxStacks: 4, source: 'chest', permanence: 'save',
+    stats: { costScale: 0.88 },
+  }),
+  up({
+    id: 'chest-keen', name: 'Keen Instinct', rarity: 'rare', element: 'any',
+    description: 'Critical chance +8%.',
+    tags: ['critical'], maxStacks: 4, source: 'chest', permanence: 'save',
+    stats: { critChance: 0.08 }, synergy: ['critical'],
+  }),
+  up({
+    id: 'chest-brutal', name: 'Brutal Instinct', rarity: 'epic', element: 'any',
+    description: 'Critical damage +0.5×.',
+    tags: ['critical'], maxStacks: 3, source: 'chest', permanence: 'save',
+    stats: { critScale: 0.5 }, synergy: ['critical'],
+  }),
+  up({
+    id: 'chest-hardened', name: 'Hardened', rarity: 'rare', element: 'any',
+    description: 'Damage taken −10%.',
+    tags: ['armor'], maxStacks: 4, source: 'chest', permanence: 'save',
+    stats: { armor: 0.1 }, synergy: ['armor'],
+  }),
+  up({
+    id: 'chest-wide-reach', name: 'Wide Reach', rarity: 'rare', element: 'any',
+    description: 'Area of effect +18%.',
+    tags: ['explosions'], maxStacks: 3, source: 'chest', permanence: 'save',
+    stats: { areaScale: 1.18 },
+  }),
+  up({
+    id: 'chest-extra-shot', name: 'Splitting Focus', rarity: 'epic', element: 'any',
+    description: 'Every projectile ability fires one additional projectile.',
+    tags: ['multi-hit'], grants: ['extra-projectile'], maxStacks: 2,
+    source: 'chest', permanence: 'save', synergy: ['multi-projectile'],
+  }),
+  up({
+    id: 'chest-lingering-bite', name: 'Lingering Bite', rarity: 'rare', element: 'any',
+    description: 'Status effects you apply are 25% stronger and last 20% longer.',
+    tags: ['control'], maxStacks: 3, source: 'chest', permanence: 'save',
+    stats: { statusPower: 1.25, statusDuration: 1.2 }, synergy: ['control'],
+  }),
+  up({
+    id: 'chest-ultimate-well', name: 'Ultimate Well', rarity: 'epic', element: 'any',
+    description: 'The Ultimate meter fills 25% faster.',
+    tags: ['ultimate'], maxStacks: 2, source: 'chest', permanence: 'save',
+    stats: { ultimateGain: 1.25 }, synergy: ['ultimate'],
+  }),
+  up({
+    id: 'chest-emberheart', name: 'Emberheart', rarity: 'epic', element: 'fire',
+    description: 'Fire damage +30% and burning spreads on death.',
+    tags: ['burning'], grants: ['corpse-explode'], maxStacks: 2,
+    source: 'chest', permanence: 'save', stats: { fireScale: 1.3 }, synergy: ['burning'],
+  }),
+  up({
+    id: 'chest-tideheart', name: 'Tideheart', rarity: 'epic', element: 'water',
+    description: 'Water damage +30% and freezing lasts 25% longer.',
+    tags: ['freezing'], grants: ['freeze-spread'], maxStacks: 2,
+    source: 'chest', permanence: 'save',
+    stats: { waterScale: 1.3, statusDuration: 1.25 }, synergy: ['freezing'],
+  }),
+  up({
+    id: 'chest-stoneheart', name: 'Stoneheart', rarity: 'epic', element: 'earth',
+    description: 'Earth damage +30% and damage taken −8%.',
+    tags: ['armor', 'heavy'], grants: ['ground-armor'], maxStacks: 2,
+    source: 'chest', permanence: 'save',
+    stats: { earthScale: 1.3, armor: 0.08 }, synergy: ['armor'],
+  }),
+  up({
+    id: 'chest-galeheart', name: 'Galeheart', rarity: 'epic', element: 'air',
+    description: 'Air damage +30% and knockback +30%.',
+    tags: ['knockback'], grants: ['hazard-slam'], maxStacks: 2,
+    source: 'chest', permanence: 'save',
+    stats: { airScale: 1.3, knockback: 1.3 }, synergy: ['knockback'],
+  }),
+];
+
 export const UPGRADES: readonly UpgradeDef[] = Object.freeze([
-  ...FIRE, ...WATER, ...EARTH, ...AIR, ...GENERIC,
+  ...FIRE, ...WATER, ...EARTH, ...AIR, ...GENERIC, ...DEPTH, ...TRADEOFFS, ...CHEST_UPGRADES,
 ]);
+
+/** Upgrades that may appear on a post-encounter selection card. */
+export const REWARD_UPGRADES: readonly UpgradeDef[] = Object.freeze(
+  UPGRADES.filter((u) => u.source !== 'chest'),
+);
+
+/** Upgrades that only ever come out of a chest. */
+export const CHEST_ONLY_UPGRADES: readonly UpgradeDef[] = Object.freeze(
+  UPGRADES.filter((u) => u.source === 'chest'),
+);
 
 const BY_ID = new Map<string, UpgradeDef>(UPGRADES.map((u) => [u.id, u]));
 
@@ -478,12 +931,175 @@ export function accumulateStats(target: StatModifiers, def: UpgradeDef, stacks: 
   }
 }
 
+/**
+ * Clamp the aggregated modifiers into ranges the game can survive.
+ *
+ * Tradeoff cards deliberately push numbers downward, so this is also the
+ * safety net that stops a stack of penalties from reducing a critical value -
+ * health, aether, movement, range - below a playable minimum.
+ */
 export function clampStats(stats: StatModifiers): StatModifiers {
   stats.armor = Math.min(0.75, Math.max(0, stats.armor));
   stats.critChance = Math.min(0.85, Math.max(0, stats.critChance));
   stats.cooldownScale = Math.max(0.25, stats.cooldownScale);
-  stats.costScale = Math.max(0.35, stats.costScale);
+  stats.costScale = Math.max(0.35, Math.min(2.2, stats.costScale));
   stats.moveScale = Math.min(2.2, Math.max(0.5, stats.moveScale));
   stats.lifesteal = Math.min(0.4, Math.max(0, stats.lifesteal));
+
+  stats.maxHealthScale = Math.min(2.5, Math.max(SAFE_MINIMUMS.maxHealthScale, stats.maxHealthScale));
+  stats.maxEnergyScale = Math.min(2.5, Math.max(SAFE_MINIMUMS.maxEnergyScale, stats.maxEnergyScale));
+  stats.regenScale = Math.min(3, Math.max(SAFE_MINIMUMS.regenScale, stats.regenScale));
+  stats.areaScale = Math.min(2.6, Math.max(0.5, stats.areaScale));
+  stats.directScale = Math.min(2.5, Math.max(SAFE_MINIMUMS.directScale, stats.directScale));
+  stats.normalHitScale = Math.min(2.5, Math.max(SAFE_MINIMUMS.normalHitScale, stats.normalHitScale));
+  stats.rangeScale = Math.min(2, Math.max(SAFE_MINIMUMS.rangeScale, stats.rangeScale));
+  stats.aimAssistScale = Math.min(1.5, Math.max(0, stats.aimAssistScale));
+  stats.ultimateDamage = Math.min(3, Math.max(0.5, stats.ultimateDamage));
+  stats.ultimateGain = Math.min(2.5, Math.max(SAFE_MINIMUMS.ultimateGain, stats.ultimateGain));
+  stats.sprintScale = Math.min(1.8, Math.max(SAFE_MINIMUMS.sprintScale, stats.sprintScale));
+  stats.oxygenDrain = Math.min(2, Math.max(0.35, stats.oxygenDrain));
+  stats.oxygenCapacity = Math.min(60, Math.max(-8, stats.oxygenCapacity));
+  stats.statusPower = Math.min(3, Math.max(0.5, stats.statusPower));
+  stats.manaOnHit = Math.min(20, Math.max(0, stats.manaOnHit));
+  stats.manaOnKill = Math.min(60, Math.max(0, stats.manaOnKill));
   return stats;
+}
+
+/**
+ * Floors a stack of penalties may never push a value below.
+ *
+ * These are gameplay-critical: a build that halves its own health four times
+ * would otherwise become unplayable rather than risky.
+ */
+export const SAFE_MINIMUMS = Object.freeze({
+  maxHealthScale: 0.45,
+  maxEnergyScale: 0.45,
+  regenScale: 0.4,
+  directScale: 0.5,
+  normalHitScale: 0.55,
+  rangeScale: 0.55,
+  ultimateGain: 0.4,
+  sprintScale: 0.6,
+});
+
+// =====================================================================
+//  Human-readable effect lines
+// =====================================================================
+
+export type EffectTone = 'good' | 'bad' | 'neutral';
+
+export interface EffectLine {
+  text: string;
+  tone: EffectTone;
+}
+
+interface StatLabel {
+  label: string;
+  /** How the raw value maps to a displayed number. */
+  kind: 'multiplier' | 'inverse-multiplier' | 'flat' | 'percent-flat';
+  suffix?: string;
+}
+
+const STAT_LABELS: Partial<Record<keyof StatModifiers, StatLabel>> = {
+  damageScale: { label: 'All elemental damage', kind: 'multiplier' },
+  fireScale: { label: 'Fire damage', kind: 'multiplier' },
+  waterScale: { label: 'Water damage', kind: 'multiplier' },
+  earthScale: { label: 'Earth damage', kind: 'multiplier' },
+  airScale: { label: 'Air damage', kind: 'multiplier' },
+  cooldownScale: { label: 'Cooldowns', kind: 'inverse-multiplier' },
+  costScale: { label: 'Ability Mana cost', kind: 'inverse-multiplier' },
+  maxHealth: { label: 'Maximum health', kind: 'flat' },
+  maxEnergy: { label: 'Maximum Mana', kind: 'flat' },
+  energyRegen: { label: 'Mana regeneration', kind: 'flat', suffix: '/s' },
+  moveScale: { label: 'Movement speed', kind: 'multiplier' },
+  projectileSpeed: { label: 'Projectile speed', kind: 'multiplier' },
+  projectileSize: { label: 'Projectile size', kind: 'multiplier' },
+  critChance: { label: 'Critical chance', kind: 'percent-flat' },
+  critScale: { label: 'Critical damage', kind: 'flat', suffix: '×' },
+  statusDuration: { label: 'Status duration', kind: 'multiplier' },
+  armor: { label: 'Damage taken', kind: 'percent-flat' },
+  lifesteal: { label: 'Life stolen from damage', kind: 'percent-flat' },
+  knockback: { label: 'Knockback', kind: 'multiplier' },
+  maxHealthScale: { label: 'Maximum health', kind: 'multiplier' },
+  maxEnergyScale: { label: 'Maximum Mana', kind: 'multiplier' },
+  regenScale: { label: 'Mana regeneration', kind: 'multiplier' },
+  areaScale: { label: 'Area of effect', kind: 'multiplier' },
+  directScale: { label: 'Direct-hit damage', kind: 'multiplier' },
+  normalHitScale: { label: 'Normal-hit damage', kind: 'multiplier' },
+  rangeScale: { label: 'Attack range', kind: 'multiplier' },
+  aimAssistScale: { label: 'Aim assistance', kind: 'multiplier' },
+  ultimateDamage: { label: 'Ultimate damage', kind: 'multiplier' },
+  ultimateGain: { label: 'Ultimate charge rate', kind: 'multiplier' },
+  sprintScale: { label: 'Sprint speed', kind: 'multiplier' },
+  oxygenCapacity: { label: 'Oxygen', kind: 'flat', suffix: 's' },
+  oxygenDrain: { label: 'Oxygen use', kind: 'inverse-multiplier' },
+  manaOnHit: { label: 'Mana restored on hit', kind: 'flat' },
+  manaOnKill: { label: 'Mana restored on defeat', kind: 'flat' },
+  statusPower: { label: 'Status effect strength', kind: 'multiplier' },
+};
+
+/** Stats where a *lower* number is better for the player. */
+const LOWER_IS_BETTER: readonly (keyof StatModifiers)[] = [
+  'cooldownScale', 'costScale', 'oxygenDrain',
+];
+
+function pct(value: number): string {
+  const p = Math.round(Math.abs(value) * 1000) / 10;
+  return `${p % 1 === 0 ? p.toFixed(0) : p.toFixed(1)}%`;
+}
+
+/**
+ * Turn one stat entry into an exact, human sentence.
+ *
+ * Never vague: the card always shows the real number the game will apply.
+ */
+export function describeStat(key: keyof StatModifiers, value: number, stacks = 1): EffectLine | null {
+  const label = STAT_LABELS[key];
+  if (!label) return null;
+
+  if (label.kind === 'multiplier' || label.kind === 'inverse-multiplier') {
+    const total = Math.pow(value, stacks);
+    if (Math.abs(total - 1) < 0.0005) return null;
+    const delta = total - 1;
+    const better = LOWER_IS_BETTER.includes(key) ? delta < 0 : delta > 0;
+    const sign = delta > 0 ? '+' : '−';
+    return { text: `${label.label} ${sign}${pct(delta)}`, tone: better ? 'good' : 'bad' };
+  }
+
+  const total = value * stacks;
+  if (Math.abs(total) < 0.0005) return null;
+  if (label.kind === 'percent-flat') {
+    // Armor reads inverted: positive armor *reduces* damage taken, and a
+    // negative value from a tradeoff card increases it.
+    if (key === 'armor') {
+      return total > 0
+        ? { text: `Damage taken −${pct(total)}`, tone: 'good' }
+        : { text: `Damage taken +${pct(total)}`, tone: 'bad' };
+    }
+    const sign = total > 0 ? '+' : '−';
+    return { text: `${label.label} ${sign}${pct(total)}`, tone: total > 0 ? 'good' : 'bad' };
+  }
+  const sign = total > 0 ? '+' : '−';
+  const shown = Math.round(Math.abs(total) * 100) / 100;
+  return {
+    text: `${label.label} ${sign}${shown}${label.suffix ?? ''}`,
+    tone: total > 0 ? 'good' : 'bad',
+  };
+}
+
+/** Every numeric change an upgrade would apply, split into gains and costs. */
+export function describeUpgrade(def: UpgradeDef, stacks = 1): {
+  benefits: EffectLine[];
+  penalties: EffectLine[];
+} {
+  const benefits: EffectLine[] = [];
+  const penalties: EffectLine[] = [];
+  for (const key of Object.keys(def.stats ?? {}) as (keyof StatModifiers)[]) {
+    const value = def.stats?.[key];
+    if (value === undefined) continue;
+    const line = describeStat(key, value, stacks);
+    if (!line) continue;
+    (line.tone === 'bad' ? penalties : benefits).push(line);
+  }
+  return { benefits, penalties };
 }

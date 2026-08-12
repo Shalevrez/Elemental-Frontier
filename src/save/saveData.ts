@@ -24,8 +24,20 @@ import { CONSUMABLE_ORDER, isConsumableId, type ConsumableId } from '../player/i
 import { isWorldId, type WorldId } from '../world/worlds';
 import { createMeta, sanitiseMeta, type MetaState } from '../progression/meta';
 import { upgradeById } from '../progression/upgrades';
+import { CHEST_BUFFS } from '../progression/chests';
+import { BASE_OXYGEN, sanitiseOxygen } from '../player/oxygen';
+import { sanitiseCharge } from '../progression/ultimate';
+import { storyBeat } from '../game/story';
 
-export const SAVE_VERSION = 4;
+/**
+ * Version 5 adds the persistent-build layer: the Ultimate unlock and charge,
+ * timed blessings, oxygen, story progress, World Heart progress, completed
+ * worlds, the post-game flag and the New Game Plus counter. Every one of those
+ * fields has a safe default, so a version 4 save loads with its affinity,
+ * seed, terrain, build and shrine progress completely intact and simply starts
+ * the new layer from zero.
+ */
+export const SAVE_VERSION = 5;
 export const SAVE_KEY = 'elemental-frontier/world';
 export const SETTINGS_KEY = 'elemental-frontier/settings';
 
@@ -86,6 +98,28 @@ export interface SaveData {
   };
   /** Permanent, cross-run progression. */
   meta: MetaState;
+
+  // ---- added in version 5: the persistent build layer
+  /** Worlds whose World Heart has been restored, in completion order. */
+  worldsCompleted: WorldId[];
+  /** Per-world World Heart progress. */
+  worldHearts: Partial<Record<WorldId, boolean>>;
+  /** True once the element's Ultimate has been unlocked. */
+  ultimateUnlocked: boolean;
+  /** Ultimate meter, 0..100, preserved across world transitions. */
+  ultimateCharge: number;
+  /** Timed blessings still running. */
+  buffs: { id: string; timeLeft: number }[];
+  /** Seconds of oxygen left. Never loaded low enough to drown immediately. */
+  oxygen: number;
+  /** Story beats already seen, so they can be skipped. */
+  story: string[];
+  /** True once the final world has been completed at least once. */
+  postGame: boolean;
+  /** How many times New Game Plus has been started inside this save. */
+  newGamePlus: number;
+  /** Which world the stored checkpoint belongs to. */
+  checkpointWorld: WorldId;
 }
 
 export type QualityPreset = 'low' | 'medium' | 'high';
@@ -108,6 +142,16 @@ export interface Settings {
   particleDensity: number;
   postProcessing: boolean;
   antialias: boolean;
+
+  // ---- accessibility
+  /** Suppress full-screen elemental flashes. */
+  reducedFlashes: boolean;
+  /** Cut camera shake to a fraction of its normal strength. */
+  reducedShake: boolean;
+  /** Suppress underwater and impact screen distortion. */
+  reducedDistortion: boolean;
+  /** Extra multiplier on particle counts, on top of the quality preset. */
+  reducedParticles: boolean;
 }
 
 export const DEFAULT_SETTINGS: Readonly<Settings> = Object.freeze({
@@ -125,6 +169,10 @@ export const DEFAULT_SETTINGS: Readonly<Settings> = Object.freeze({
   particleDensity: 1,
   postProcessing: true,
   antialias: true,
+  reducedFlashes: false,
+  reducedShake: false,
+  reducedDistortion: false,
+  reducedParticles: false,
 });
 
 export const QUALITY_PRESETS: Readonly<Record<QualityPreset, Partial<Settings>>> = Object.freeze({
@@ -242,7 +290,65 @@ export function createSave(
       scenariosCompleted: 0, worldsReached: 1,
     },
     meta: createMeta(),
+    worldsCompleted: [],
+    worldHearts: {},
+    ultimateUnlocked: false,
+    ultimateCharge: 0,
+    buffs: [],
+    oxygen: BASE_OXYGEN,
+    story: [],
+    postGame: false,
+    newGamePlus: 0,
+    checkpointWorld: 'wilds',
   };
+}
+
+/** Keep only world ids that still exist, in order and without duplicates. */
+export function sanitiseWorldList(value: unknown): WorldId[] {
+  const out: WorldId[] = [];
+  if (!Array.isArray(value)) return out;
+  for (const entry of value) {
+    if (isWorldId(entry) && !out.includes(entry)) out.push(entry);
+  }
+  return out;
+}
+
+function sanitiseWorldHearts(value: unknown, completed: readonly WorldId[]): Partial<Record<WorldId, boolean>> {
+  const out: Partial<Record<WorldId, boolean>> = {};
+  if (value && typeof value === 'object') {
+    for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+      if (isWorldId(key) && raw === true) out[key] = true;
+    }
+  }
+  // A completed world always implies its Heart, whatever the stored map says.
+  for (const id of completed) out[id] = true;
+  return out;
+}
+
+/** Sanitise the serialised timed blessings. */
+export function sanitiseBuffs(value: unknown): { id: string; timeLeft: number }[] {
+  const out: { id: string; timeLeft: number }[] = [];
+  if (!Array.isArray(value)) return out;
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object') continue;
+    const id = (raw as { id?: unknown }).id;
+    const timeLeft = (raw as { timeLeft?: unknown }).timeLeft;
+    if (typeof id !== 'string' || !CHEST_BUFFS[id]) continue;
+    const seconds = typeof timeLeft === 'number' && Number.isFinite(timeLeft) ? timeLeft : 0;
+    if (seconds > 0.05) out.push({ id, timeLeft: Math.min(CHEST_BUFFS[id]!.seconds, seconds) });
+    if (out.length >= 16) break;
+  }
+  return out;
+}
+
+/** Keep only story beat ids that still exist. */
+export function sanitiseStory(value: unknown): string[] {
+  const out: string[] = [];
+  if (!Array.isArray(value)) return out;
+  for (const entry of value) {
+    if (typeof entry === 'string' && storyBeat(entry) && !out.includes(entry)) out.push(entry);
+  }
+  return out;
 }
 
 /** Keep only upgrade ids that still exist, clamped to their stack ceiling. */
@@ -352,6 +458,8 @@ export function validateSave(raw: unknown): ValidationResult {
       ? { berries: 2, minorPotion: 1 } // a small welcome pack for migrated worlds
       : {};
 
+  const worldsCompleted = sanitiseWorldList(src.worldsCompleted);
+
   const data: SaveData = {
     version: SAVE_VERSION,
     seed,
@@ -384,6 +492,20 @@ export function validateSave(raw: unknown): ValidationResult {
     encounters: num(src.encounters, 0, 0, 1e6),
     runStats: sanitiseRunStats(src.runStats),
     meta: sanitiseMeta(src.meta),
+    // Version 5 fields. A version 4 save simply starts the persistent-build
+    // layer from its defaults; nothing it already had is touched.
+    worldsCompleted,
+    worldHearts: sanitiseWorldHearts(src.worldHearts, worldsCompleted),
+    ultimateUnlocked: bool(src.ultimateUnlocked, cleansedCount > 0),
+    ultimateCharge: sanitiseCharge(src.ultimateCharge),
+    buffs: sanitiseBuffs(src.buffs),
+    oxygen: sanitiseOxygen(src.oxygen, BASE_OXYGEN),
+    story: sanitiseStory(src.story),
+    postGame: bool(src.postGame, worldsCompleted.length >= 4),
+    newGamePlus: Math.max(0, Math.floor(num(src.newGamePlus, 0, 0, 999))),
+    checkpointWorld: isWorldId(src.checkpointWorld)
+      ? src.checkpointWorld
+      : isWorldId(src.worldTheme) ? src.worldTheme : 'wilds',
   };
 
   if (src.activeElement !== data.activeElement) migrated = true;
@@ -486,6 +608,10 @@ export function validateSettings(raw: unknown): Settings {
     particleDensity: num(src.particleDensity, DEFAULT_SETTINGS.particleDensity, 0.25, 1.5),
     postProcessing: bool(src.postProcessing, DEFAULT_SETTINGS.postProcessing),
     antialias: bool(src.antialias, DEFAULT_SETTINGS.antialias),
+    reducedFlashes: bool(src.reducedFlashes, DEFAULT_SETTINGS.reducedFlashes),
+    reducedShake: bool(src.reducedShake, DEFAULT_SETTINGS.reducedShake),
+    reducedDistortion: bool(src.reducedDistortion, DEFAULT_SETTINGS.reducedDistortion),
+    reducedParticles: bool(src.reducedParticles, DEFAULT_SETTINGS.reducedParticles),
   };
 }
 

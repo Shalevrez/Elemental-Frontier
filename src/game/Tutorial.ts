@@ -14,6 +14,9 @@ export interface TutorialTracker {
   sprinted: boolean;
   primaryUsed: boolean;
   secondaryUsed: boolean;
+  techniqueUsed: boolean;
+  ultimateUsed: boolean;
+  chestOpened: boolean;
   terrainDug: number;
   terrainAdded: number;
   terrainModeUsed: boolean;
@@ -29,6 +32,9 @@ export function createTracker(): TutorialTracker {
     sprinted: false,
     primaryUsed: false,
     secondaryUsed: false,
+    techniqueUsed: false,
+    ultimateUsed: false,
+    chestOpened: false,
     terrainDug: 0,
     terrainAdded: 0,
     terrainModeUsed: false,
@@ -79,6 +85,20 @@ export function buildTutorial(affinity: AffinityId, active: ElementId, mode: Wor
       isDone: (t) => t.secondaryUsed,
     });
   }
+
+  steps.push({
+    text: `<b>${el.technique.name}</b> - <kbd>Q</kbd>. ${stripTags(el.technique.blurb)}`,
+    isDone: (t) => t.techniqueUsed,
+  });
+  steps.push({
+    text: `<b>${el.ultimate.name}</b> - <kbd>MMB</kbd> or <kbd>R</kbd> once the Ultimate meter is full. `
+      + 'The meter fills by fighting, never by scrolling the wheel.',
+    isDone: (t) => t.ultimateUsed,
+  });
+  steps.push({
+    text: 'Open a chest with <kbd>E</kbd>. Chests hold permanent upgrades, blessings and recovery.',
+    isDone: (t) => t.chestOpened,
+  });
 
   steps.push(
     {

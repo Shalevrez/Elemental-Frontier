@@ -23,7 +23,7 @@ import {
   chooseHealingItem, type ConsumableId,
 } from '../player/inventory';
 import { AbilitySystem, type AbilitySlot } from '../elements/abilities';
-import { UI, type CrosshairState, type HudState } from '../ui/UI';
+import { UI, type CrosshairState, type HudAbility, type HudState } from '../ui/UI';
 import { ELEMENTS, ELEMENT_ORDER, affinityPresentation } from '../elements/elements';
 import {
   isConvergence, resolveActiveElement, rollAffinity,
@@ -39,16 +39,37 @@ import {
   type WorldMode,
 } from '../world/shrineData';
 import { Mat, materialDef, type MaterialId } from '../world/materials';
-import { SEA_LEVEL, WORLD_CENTER, inWorld } from '../world/coords';
+import { SEA_LEVEL, WORLD_CENTER, WORLD_SIZE, inWorld } from '../world/coords';
 import { serialiseOps, clampBrush, type TerrainOp } from '../world/terrainEdits';
 import { randomSeed } from '../core/rng';
 import { Decals } from '../fx/Decals';
+import { buildPortal } from '../render/models';
 import { Weather, weatherAt } from '../fx/Weather';
 import { Telegraphs } from '../fx/Telegraphs';
 import { RunState } from '../progression/RunState';
-import { RARITY_COLORS } from '../progression/upgrades';
+import { RARITY_COLORS, RARITY_ORDER } from '../progression/upgrades';
 import { relativeBearing } from '../combat/CombatDirector';
 import { CombatDebug, type DebugFrame } from '../combat/CombatDebug';
+import { CollisionDebug, type CollisionFrame } from '../combat/CollisionDebug';
+import { PLAYER_HEIGHT, PLAYER_RADIUS } from '../player/collision';
+import { resolveRespawn, type RespawnProbe, type RespawnResult } from '../player/respawn';
+import { TerrainEffects } from '../world/deformation';
+import {
+  addCharge, consumeUltimate, createUltimateState, isUltimateReady, registerComboHit,
+  sanitiseCharge, tickUltimate, ultimateDenial, ultimateFraction,
+  type ChargeSource, type UltimateState,
+} from '../progression/ultimate';
+import {
+  absorbPickup, createManaState, isFreeCast, manaFeedback, notifyCast, notifyCombat,
+  onAffinityTerrain, resolvePrimaryCost, tickMana, type ManaState,
+} from '../progression/mana';
+import { BuffTracker, combineModifiers } from '../progression/buffs';
+import { CHEST_BUFFS, chestRarityLabel, rollChestOutcome, type ChestOutcome } from '../progression/chests';
+import { StoryProgress, type StoryBeat } from './story';
+import {
+  WORLD_ORDER, nextWorld, worldDef, worldIndex, type WorldId,
+} from '../world/worlds';
+import { previewOffer } from '../progression/rewards';
 import { abilityCombat } from '../combat/combatConfig';
 import type { EliteId, EnemyKind } from '../combat/enemyTypes';
 import { ENEMY_TYPES } from '../combat/enemyTypes';
@@ -62,7 +83,8 @@ import { buildTutorial, createTracker, tutorialTitle, type TutorialStepDef, type
 
 type GameState =
   | 'boot' | 'title' | 'newworld' | 'settings' | 'loading' | 'reveal'
-  | 'playing' | 'paused' | 'dead' | 'upgrade' | 'victory' | 'confirm' | 'satchel' | 'reward';
+  | 'playing' | 'paused' | 'dead' | 'upgrade' | 'victory' | 'confirm' | 'satchel'
+  | 'reward' | 'chest' | 'story';
 
 const REACH = 7;
 const ELEMENT_SWITCH_COOLDOWN = 1.2;
@@ -102,6 +124,42 @@ export class Game {
   private weather = new Weather();
   private telegraphs = new Telegraphs();
   private run = new RunState();
+  /** Ground effects created by combat: burning ground, ice, steam, smoke. */
+  private effects: TerrainEffects;
+  /** The Ultimate charge meter. */
+  private ultimate: UltimateState = createUltimateState(false);
+  /** Mana regeneration state machine. */
+  private manaState: ManaState = createManaState();
+  /** Timed blessings from chests and world events. */
+  private buffs = new BuffTracker(CHEST_BUFFS);
+  /** Story beats already seen. */
+  private story = new StoryProgress();
+  private pendingStory: StoryBeat | null = null;
+  private storyBannerTimer = 0;
+
+  /** Which world the player is currently in. */
+  private worldId: WorldId = 'wilds';
+  /** Worlds whose World Heart has been restored. */
+  private worldsCompleted: WorldId[] = [];
+  /** Position of this world's exit portal, once the Heart is restored. */
+  private portal: { x: number; y: number; z: number; object: THREE.Object3D | null } | null = null;
+  private portalPulse = 0;
+
+  /** The chest reward currently being presented. */
+  private pendingChest: { outcome: ChestOutcome; propId: number } | null = null;
+  /** Last resolved safe respawn point, also shown by the collision debug view. */
+  private lastRespawn: RespawnResult | null = null;
+  /** Seconds since the last hostile contact, for out-of-combat regeneration. */
+  private combatTimer = 0;
+  /** Cooldown between lava contact ticks. */
+  private lavaTick = 0;
+  /** Cooldown between underwater bubble bursts. */
+  private underwaterTick = 0;
+  /** Current Mana bar state, shown by the HUD. */
+  private manaFeedback: ReturnType<typeof manaFeedback> = 'normal';
+  /** True while the element's terrain is boosting Mana regeneration. */
+  private manaTerrainBonus = false;
+
   /** Short freeze applied on weighty impacts. */
   private hitStopTimer = 0;
   /** Pooled short-lived lights for elemental impacts. */
@@ -154,6 +212,8 @@ export class Game {
 
   /** Development-only combat visualiser. Disabled until F9 is pressed. */
   private readonly combatDebug = new CombatDebug();
+  /** Development-only collision visualiser. Disabled until F10 is pressed. */
+  private readonly collisionDebug = new CollisionDebug();
   private readonly debugBoxes: { id: number; capsule: Capsule; visible: boolean }[] = [];
   private readonly debugVolumes: Capsule[] = [];
   private readonly debugPaths: { from: Vec3; to: Vec3 }[] = [];
@@ -164,6 +224,8 @@ export class Game {
     this.renderer = new Renderer(canvas);
     this.input = new Input(canvas);
     this.player = new Player(this.world);
+    this.player.obstacles = this.world.obstacles;
+    this.effects = new TerrainEffects(this.world);
 
     this.projectiles = new Projectiles({
       onImpact: (p, point, entity) => this.onProjectileImpact(p, point, entity),
@@ -201,6 +263,14 @@ export class Game {
       audio: this.audio,
       decals: this.decals,
       build: this.run.build,
+      // Permanent build and timed blessings are combined once, here, so every
+      // ability sees the same numbers the HUD shows.
+      modifiers: () => combineModifiers(this.run.build.modifiers, this.buffs.modifiers),
+      grant: (tag) => this.run.build.grant(tag) + this.buffs.grant(tag),
+      effects: this.effects,
+      charge: (source, magnitude) => this.addUltimateCharge(source, magnitude),
+      comboHit: () => registerComboHit(this.ultimate),
+      refundMana: (amount) => this.grantMana(amount),
       affinityBonus: () => this.run.affinityBonus,
       flash: (color, strength) => this.ui.elementFlash(color, strength),
       hitMarker: (crit) => this.ui.hitMarker(crit),
@@ -223,6 +293,7 @@ export class Game {
     });
 
     this.renderer.scene.add(this.combatDebug.group);
+    this.renderer.scene.add(this.collisionDebug.group);
     this.renderer.scene.add(this.world.group);
     this.renderer.scene.add(this.flora.group);
     this.renderer.scene.add(this.props.group);
@@ -274,6 +345,8 @@ export class Game {
       onCloseSatchel: () => this.closeSatchel(),
       onTakeReward: (id) => this.takeReward(id),
       onSkipReward: () => this.skipReward(),
+      onCloseChest: () => this.closeChest(),
+      onCloseStory: () => this.finishStory(),
       onAnyInteraction: () => this.audio.unlock(),
     });
     this.ui.onTutorialDismissed = () => {
@@ -371,9 +444,12 @@ export class Game {
     this.renderer.setAntialias(this.settings.antialias);
     this.world.setShadowCasting(this.settings.shadows);
     this.world.setMeshBudget(4 * this.settings.terrainDetail);
-    this.particles.setDensity(this.settings.particleDensity);
-    this.decals.setBudget(24 + this.settings.particleDensity * 48);
-    this.weather.setDensityScale(this.settings.particleDensity);
+    // The accessibility toggle thins particles further, on top of the quality
+    // preset, for players who find dense effects hard to read.
+    const particleScale = this.settings.particleDensity * (this.settings.reducedParticles ? 0.4 : 1);
+    this.particles.setDensity(particleScale);
+    this.decals.setBudget(24 + particleScale * 48);
+    this.weather.setDensityScale(particleScale);
     this.maxPulseLights = this.settings.postProcessing ? 5 : 2;
     this.projectiles.setMaxLights(this.settings.postProcessing ? 4 : 2);
     this.audio.setVolumes({
@@ -485,19 +561,28 @@ export class Game {
   }
 
   private *loadSequence(save: SaveData): Generator<{ progress: number; note: string }, void, void> {
-    for (const p of this.world.generate(save.seed, save.shrines)) {
-      yield { progress: p, note: 'Raising hills, carving caves and basins…' };
+    const def = worldDef(save.worldTheme);
+    this.worldId = save.worldTheme;
+    for (const p of this.world.generate(save.seed, save.shrines, def)) {
+      yield { progress: p, note: `Shaping ${def.name}…` };
     }
     yield { progress: 0.58, note: 'Replaying your excavations…' };
     this.world.applyJournal(opsFromSave(save));
     for (const p of this.world.buildAllChunks()) {
       yield { progress: 0.6 + p * 0.32, note: 'Building the smooth terrain surface…' };
     }
-    yield { progress: 0.94, note: 'Planting forests and lighting campfires…' };
+    yield { progress: 0.94, note: 'Planting the world and lighting its fires…' };
     this.world.resolveSpawn(WORLD_CENTER, WORLD_CENTER);
-    this.flora.build(this.world, save.seed, 1);
+    this.flora.build(this.world, save.seed, def.vegetation);
     this.props.build(this.world, save.seed, save.lootedProps);
-    yield { progress: 0.98, note: 'Waking the shrines…' };
+    yield { progress: 0.97, note: 'Fitting collision to the scenery…' };
+    // Every visible solid gets a matching collision volume before the player
+    // is ever placed, so nothing can be walked through and no respawn lands
+    // inside a tree.
+    this.world.obstacles.clear();
+    this.flora.registerObstacles(this.world.obstacles);
+    this.props.registerObstacles(this.world.obstacles);
+    yield { progress: 0.99, note: 'Waking the shrines…' };
     this.finishLoad(save);
   }
 
@@ -508,10 +593,23 @@ export class Game {
     this.player.activeElement = this.activeElement;
 
     this.shrines.build(save.shrines, save.guardians, save.motes, save.worldMode);
+    this.shrines.registerObstacles(this.world.obstacles);
     this.enemies.setCleansed(save.shrines);
     // Force the manager into the right mode without triggering a transition.
     this.enemies.setMode(save.worldMode === 'peaceful' ? 'peaceful' : 'normal');
     this.shrines.setMode(save.worldMode);
+
+    // ---- restore the persistent build layer before stats are computed, so
+    // chest rewards, blessings and tradeoffs are all in force immediately.
+    this.worldsCompleted = [...save.worldsCompleted];
+    this.buffs.load(save.buffs);
+    this.story.load(save.story);
+    this.ultimate = createUltimateState(save.ultimateUnlocked);
+    this.ultimate.charge = sanitiseCharge(save.ultimateCharge);
+    this.manaState = createManaState();
+    this.effects.clear();
+    this.player.obstacles = this.world.obstacles;
+    this.player.oxygen.oxygen = save.oxygen;
 
     const stats = accumulateUpgrades(save.upgrades, isConvergence(save.affinity));
     this.player.applyStats(stats, false);
@@ -535,11 +633,10 @@ export class Game {
     if (!inWorld(px, py, pz) || this.pendingIsNew) {
       px = spawn.x; py = spawn.y; pz = spawn.z;
     }
-    this.player.teleport(px, py, pz);
-    if (this.player.isStuck()) {
-      this.player.teleport(spawn.x, spawn.y, spawn.z);
-      this.player.unstick();
-    }
+    // Loading uses the same validated placement as respawning, so a save made
+    // mid-air, inside a wall the player raised, or under water can never drop
+    // the player into an unfair or drowning situation.
+    this.placePlayerSafely([px, py, pz]);
     this.player.yaw = save.yaw;
     this.player.pitch = save.pitch;
     this.lastPlayerPos.copy(this.player.position);
@@ -599,8 +696,13 @@ export class Game {
   private enterPlay(): void {
     this.setState('playing');
     this.ui.applyTheme(this.affinity, this.activeElement);
-    this.input.requestLock();
     this.persist();
+    // The opening plays once per save; each world introduces itself once.
+    // These run *before* the pointer is captured, so a story screen that opens
+    // here is immediately clickable rather than sitting behind a locked cursor.
+    this.playStory(this.story.pending('opening'));
+    this.playStory(this.story.pending('world-intro', this.worldId));
+    if (this.state === 'playing') this.input.requestLock();
   }
 
   private pause(): void {
@@ -645,10 +747,17 @@ export class Game {
     this.setState('title');
   }
 
+  /**
+   * Continue after the ending.
+   *
+   * Nothing is reset: the same element, the same powers, the same upgrades and
+   * the same Ultimate. The worlds simply stay open.
+   */
   private continueAfterVictory(): void {
     this.audio.play('ui-click');
     this.setState('playing');
-    this.input.requestLock();
+    this.playStory(this.story.pending('post-game'));
+    if (this.state === 'playing') this.input.requestLock();
   }
 
   private cancelConfirm(): void {
@@ -746,7 +855,17 @@ export class Game {
       else if (this.state === 'paused') this.resume();
       else if (this.state === 'satchel') this.closeSatchel();
       else if (this.state === 'settings') this.closeSettings();
+      else if (this.state === 'chest') this.closeChest();
+      else if (this.state === 'story') this.finishStory();
       else if (this.state === 'confirm' || this.state === 'newworld') this.cancelConfirm();
+      return;
+    }
+    if ((code === 'Space' || code === 'Enter') && this.state === 'story') {
+      this.finishStory();
+      return;
+    }
+    if ((code === 'Space' || code === 'Enter') && this.state === 'chest') {
+      this.closeChest();
       return;
     }
     if (code === 'F3') {
@@ -758,6 +877,11 @@ export class Game {
       const on = this.combatDebug.toggle();
       this.ui.setCombatDebug(on ? '' : null);
       if (on) this.ui.toast('Combat debug on', 'plain', 1.4);
+    }
+    if (code === 'F10') {
+      const on = this.collisionDebug.toggle();
+      this.ui.setCollisionDebug(on ? '' : null);
+      this.ui.toast(on ? 'Collision debug on' : 'Collision debug off', 'plain', 1.4);
     }
     if (code === 'KeyI') {
       if (this.state === 'playing') this.openSatchel();
@@ -800,7 +924,9 @@ export class Game {
     this.lastTime = now;
     let dt = Math.min(0.05, Math.max(0, rawDt));
 
-    // Hit-stop: briefly slow time so heavy impacts land with weight.
+    // Hit-stop: briefly slow time so heavy impacts land with weight. Players
+    // who have asked for reduced distortion get a much lighter version.
+    if (this.settings.reducedDistortion && this.hitStopTimer > 0) this.hitStopTimer *= 0.4;
     if (this.hitStopTimer > 0) {
       this.hitStopTimer -= dt;
       dt *= 0.12;
@@ -817,12 +943,20 @@ export class Game {
     } else if (this.state === 'playing') {
       this.updatePlaying(dt);
     } else if (this.state === 'paused' || this.state === 'dead' || this.state === 'upgrade'
-               || this.state === 'victory' || this.state === 'satchel' || this.state === 'reward') {
+               || this.state === 'victory' || this.state === 'satchel' || this.state === 'reward'
+               || this.state === 'chest' || this.state === 'story') {
       // Keep the world alive behind the menus.
       this.particles.update(dt);
       this.flora.update(dt);
       this.props.update(dt, this.renderer.camera.position, this.renderer.renderDistanceUnits);
       this.world.update(dt, this.renderer.camera, this.renderer.renderDistanceUnits);
+    }
+
+    // The loading screen is pure DOM: skip the 3D pass entirely so every
+    // available millisecond goes into building the world.
+    if (this.state === 'loading') {
+      this.input.endFrame();
+      return;
     }
 
     const hasWorld = !!this.world.density;
@@ -857,12 +991,27 @@ export class Game {
   }
 
   private stepLoading(): void {
-    const budgetEnd = performance.now() + 14;
+    // Nothing else is happening while the world is being built, so the loading
+    // step gets a generous slice of the frame. On a slow machine this is the
+    // difference between a loading screen that finishes and one that crawls.
+    const budgetEnd = performance.now() + 60;
     let last = { progress: 0, note: '' };
-    while (performance.now() < budgetEnd && this.loadIterator) {
-      const step = this.loadIterator.next();
-      if (step.done) { this.loadIterator = null; break; }
-      last = step.value;
+    try {
+      while (performance.now() < budgetEnd && this.loadIterator) {
+        const step = this.loadIterator.next();
+        if (step.done) { this.loadIterator = null; break; }
+        last = step.value;
+      }
+    } catch (error) {
+      // A failure here used to leave the loading screen spinning forever.
+      // Surface it and return to the title instead of hanging.
+      this.loadIterator = null;
+      // eslint-disable-next-line no-console
+      console.error('[Elemental Frontier] world load failed', error);
+      this.ui.toast('The world could not be loaded - returning to the title', 'bad', 5);
+      this.refreshTitle();
+      this.setState('title');
+      return;
     }
     if (last.note) this.ui.setLoading(last.progress, last.note);
   }
@@ -964,11 +1113,16 @@ export class Game {
     this.updatePulseLights(dt);
     this.updateAtmosphere(dt);
 
+    this.updateEnvironment(dt);
+    this.updateManaAndUltimate(dt);
     this.updateHealing(dt);
     this.handleInteractions(dt);
+    this.updatePortal(dt);
 
-    this.player.applyToCamera(this.renderer.camera);
-    if (this.player.headInWater) this.ui.elementFlash(0x1f5fbd, 0.28);
+    this.player.applyToCamera(this.renderer.camera, this.settings.reducedShake ? 0.3 : 1);
+    if (this.player.headInWater && !this.settings.reducedFlashes) {
+      this.ui.elementFlash(this.world.fluidIsHazard ? 0xd43f1a : 0x1f5fbd, 0.28);
+    }
 
     if (this.player.nearWorldEdge()) {
       this.edgeWarned -= dt;
@@ -986,6 +1140,15 @@ export class Game {
       return;
     }
 
+    // A story beat that was queued during a fight plays as soon as it is safe.
+    if (this.pendingStory && !this.enemies.hostilePressure(this.player.position, 26)) {
+      const queued = this.pendingStory;
+      this.pendingStory = null;
+      this.playStory(queued);
+      return;
+    }
+    if (this.storyBannerTimer > 0) this.storyBannerTimer -= dt;
+
     this.updateTutorial();
     this.updateHud();
     this.updateCombatDebug(dt);
@@ -999,29 +1162,73 @@ export class Game {
 
   // ------------------------------------------------------- element mode
 
+  /**
+   * Element Mode inputs.
+   *
+   * Left mouse is the primary, right mouse the secondary, Q the technique, and
+   * the Ultimate is a middle *click* or R. Wheel scrolling is read separately
+   * and is never treated as a button, so a scroll can never fire an Ultimate.
+   * None of these are read at all in Build Mode.
+   */
   private handleElementMode(): void {
-    if (this.input.wasMousePressed(0)) this.fireAbility('primary');
-    if (this.input.wasMousePressed(2)) this.fireAbility('secondary');
+    const input = this.input;
+    if (input.wasMousePressed(0)) this.fireAbility('primary');
+    if (input.wasMousePressed(2)) this.fireAbility('secondary');
+    if (input.wasPressed('KeyQ')) this.fireAbility('technique');
+    if (input.middleClicked() || input.wasPressed('KeyR')) this.fireUltimate();
     this.renderer.setBrushPreview(null);
   }
 
+  private static readonly SLOT_NODES: Record<AbilitySlot, string> = {
+    primary: 'ability-primary',
+    secondary: 'ability-secondary',
+    technique: 'ability-technique',
+  };
+
   private fireAbility(slot: AbilitySlot): void {
-    const result = this.abilities.use(this.activeElement, slot);
-    const node = document.getElementById(slot === 'primary' ? 'ability-primary' : 'ability-secondary');
+    const node = document.getElementById(Game.SLOT_NODES[slot]);
+    const fullCost = this.abilities.costOf(this.activeElement, slot);
+
+    // The primary attack always has something to fall back on, so a player who
+    // is out of Mana is never reduced to running away.
+    let cost: number | undefined;
+    let power = 1;
+    if (slot === 'primary') {
+      const resolved = resolvePrimaryCost(
+        fullCost, this.player.energy, this.player.maxEnergy, isFreeCast(this.manaState),
+      );
+      if (resolved) {
+        cost = resolved.cost;
+        power = resolved.power;
+        if (resolved.weakened) this.ui.toast('Low aether — weakened cast', 'warn', 1);
+      }
+    } else if (isFreeCast(this.manaState)) {
+      cost = 0;
+    }
+
+    const result = this.abilities.use(this.activeElement, slot, cost, power);
     if (result === 'ok') {
       if (slot === 'primary') this.tracker.primaryUsed = true;
-      else this.tracker.secondaryUsed = true;
+      else if (slot === 'secondary') this.tracker.secondaryUsed = true;
+      else this.tracker.techniqueUsed = true;
+      notifyCast(this.manaState, this.abilities.lastCastCost, this.player.maxEnergy);
       node?.classList.add('fired');
       window.setTimeout(() => node?.classList.remove('fired'), 160);
-    } else {
-      node?.classList.remove('deny');
-      void node?.offsetWidth;
-      node?.classList.add('deny');
-      window.setTimeout(() => node?.classList.remove('deny'), 340);
-      this.audio.play('deny', 140);
-      if (result === 'energy') this.ui.toast('Not enough aether', 'warn', 1.2);
-      else if (result === 'cooldown') this.ui.toast('Still gathering', 'warn', 1);
-      else if (result === 'blocked') this.ui.toast('No dash left in the air', 'warn', 1.2);
+      return;
+    }
+
+    node?.classList.remove('deny');
+    void node?.offsetWidth;
+    node?.classList.add('deny');
+    window.setTimeout(() => node?.classList.remove('deny'), 340);
+    this.audio.play('deny', 140);
+    if (result === 'energy') {
+      this.ui.toast(`Not enough aether — needs ${Math.round(fullCost)}`, 'warn', 1.4);
+    } else if (result === 'cooldown') {
+      const left = this.abilities.remaining(this.activeElement, slot);
+      this.ui.toast(`Still gathering — ${left.toFixed(1)}s`, 'warn', 1);
+    } else if (result === 'blocked') {
+      this.ui.toast('No room for that here', 'warn', 1.2);
     }
   }
 
@@ -1156,6 +1363,153 @@ export class Game {
     this.weather.update(dt, this.renderer.camera.position);
   }
 
+  // --------------------------------------------------------- environment
+
+  /**
+   * Environmental hazards and terrain effects.
+   *
+   * Lava is the sharpest of these: touching it hurts immediately and sets a
+   * short burn running, but a brief accidental contact is survivable and the
+   * shoreline is visibly marked, so it never feels like an instant death.
+   */
+  private updateEnvironment(dt: number): void {
+    const def = worldDef(this.worldId);
+    const pos = this.player.position;
+
+    for (const zone of this.effects.tick(dt)) {
+      if (zone.kind === 'burning') {
+        this.particles.spark({
+          count: 6, x: zone.x, y: zone.y + 0.4, z: zone.z, spread: zone.radius * 0.6,
+          vy: 1.6, jitter: 1.4, color: 0x8a5a3a, size: 0.3, life: 0.8, gravity: 1, drag: 1.4,
+        });
+      }
+    }
+
+    // ---- ground zones damage creatures standing in them
+    for (const e of this.enemies.live) {
+      if (!e.alive) continue;
+      const dps = this.effects.damageAt(e.pos.x, e.pos.y, e.pos.z, 'player');
+      if (dps > 0) e.damage(dps * dt, 'fire', null, 0);
+    }
+
+    // ---- and the player, from anything they did not create
+    const hostileDps = this.effects.damageAt(pos.x, pos.y, pos.z, 'world')
+      + this.effects.damageAt(pos.x, pos.y, pos.z, 'enemy');
+    if (hostileDps > 0) {
+      this.player.takingDamageOverTime = true;
+      this.player.applyDamage(hostileDps * dt, null, 0, true);
+    }
+
+    // ---- slippery ground: ice zones, or a world that is slick everywhere
+    this.player.onSlipperyGround = def.slippery
+      ? this.player.standingOnFirmGround() === false && this.player.onGround
+      : this.effects.slipperyAt(pos.x, pos.y, pos.z);
+
+    // ---- lava contact
+    if (def.hazard.kind === 'lava') {
+      const feet = pos.y + 0.2;
+      if (feet < this.world.fluidLevel) {
+        if (this.lavaTick <= 0) {
+          this.lavaTick = 0.5;
+          this.player.applyDamage(def.hazard.contactDamage * 0.5, null, 0, true);
+          this.audio.play('hurt', 120);
+          this.ui.damageFlash(0.4);
+          this.ui.toast(`${def.hazard.name} burns`, 'bad', 1.2);
+          // A short damage-over-time follows, not an instant kill.
+          this.effects.add(
+            'burning', pos.x, pos.y, pos.z, 1.2, def.hazard.dotSeconds,
+            def.hazard.dotDamage, 'world',
+          );
+        }
+        this.player.takingDamageOverTime = true;
+      }
+      this.lavaTick -= dt;
+
+      // Water abilities meeting lava crust it over and raise steam.
+      if (this.activeElement === 'water' && this.abilities.casting && feet < this.world.fluidLevel + 3) {
+        this.effects.quenchLava(pos.x, pos.z, this.world.fluidLevel, 3);
+      }
+    }
+
+    // ---- air pockets: an enclosed space under the fluid line with a ceiling
+    this.player.inAirPocket = this.player.headInWater
+      && this.world.isSolid(pos.x, pos.y + PLAYER_HEIGHT + 1.2, pos.z)
+      && !this.world.isSolid(pos.x, pos.y + PLAYER_HEIGHT * 0.8, pos.z)
+      && this.airPocketNear(pos.x, pos.y, pos.z);
+
+    // ---- underwater ambience and bubbles
+    if (this.player.headInWater && !this.world.fluidIsHazard) {
+      this.underwaterTick -= dt;
+      if (this.underwaterTick <= 0) {
+        this.underwaterTick = 0.4;
+        this.particles.spark({
+          count: 3, x: pos.x, y: pos.y + 1.4, z: pos.z, spread: 0.3, vy: 2.4, jitter: 0.6,
+          color: 0xcfe9ff, color2: 0xffffff, size: 0.14, life: 1.2, gravity: 1.6, drag: 0.6,
+        });
+      }
+    }
+  }
+
+  /**
+   * Is there breathable air within reach above this point?
+   *
+   * Used for the drowned ruins of the Tidal Archipelago, where a submerged
+   * chamber with a roof pocket is a real, findable refuge.
+   */
+  private airPocketNear(x: number, y: number, z: number): boolean {
+    for (let h = 0.4; h <= 3.2; h += 0.4) {
+      const probe = y + PLAYER_HEIGHT * 0.8 + h;
+      if (probe >= this.world.fluidLevel) return false;
+      if (this.world.isSolid(x, probe, z)) return false;
+      // A pocket is air trapped under rock: the ceiling has to be solid.
+      if (this.world.isSolid(x, probe + 0.5, z)) return true;
+    }
+    return false;
+  }
+
+  // ------------------------------------------------------- mana & ultimate
+
+  private updateManaAndUltimate(dt: number): void {
+    const m = this.modifiers();
+
+    // ---- timed blessings
+    for (const expired of this.buffs.tick(dt)) {
+      this.ui.toast(`${expired.name} has faded`, 'plain', 2);
+      this.applyBuildToPlayer();
+    }
+
+    // ---- ultimate meter
+    tickUltimate(this.ultimate, dt);
+    if (this.ultimate.justReady) this.announceUltimateReady();
+
+    // ---- mana
+    const pressure = this.enemies.hostilePressure(this.player.position, 26);
+    const inCombat = pressure || this.healing.sinceDamaged < 2.5;
+    if (inCombat) notifyCombat(this.manaState);
+    this.combatTimer = inCombat ? 0 : this.combatTimer + dt;
+
+    const affinityTerrain = onAffinityTerrain(this.activeElement, {
+      nearWater: this.player.nearWater(),
+      onStone: this.player.standingOnFirmGround(),
+      nearFire: this.effects.damageAt(
+        this.player.position.x, this.player.position.y, this.player.position.z, 'player',
+      ) > 0,
+      airborneOrFast: !this.player.onGround
+        || Math.hypot(this.player.velocity.x, this.player.velocity.z) > 6.5,
+    });
+
+    const tick = tickMana(this.manaState, dt, {
+      maxMana: this.player.maxEnergy,
+      baseRegen: this.player.energyRegen * m.regenScale,
+      inCombat,
+      element: this.activeElement,
+      onAffinityTerrain: affinityTerrain,
+    });
+    if (tick.regen > 0) this.player.addEnergy(tick.regen);
+    this.manaFeedback = manaFeedback(this.player.energy, this.player.maxEnergy, tick, this.manaState);
+    this.manaTerrainBonus = tick.terrainBonus > 0;
+  }
+
   // ------------------------------------------------------------- healing
 
   private updateHealing(dt: number): void {
@@ -1281,6 +1635,8 @@ export class Game {
       if (interaction.status === 'guardian') {
         this.ui.setPrompt(`${name} · the guardian still stands`, '!');
         this.cleanseProgress = 0;
+        // A short beat before the fight, once per world, never mid-combat.
+        this.playStory(this.story.pending('pre-boss', this.worldId));
         return;
       }
       if (interaction.status === 'ritual') {
@@ -1313,7 +1669,15 @@ export class Game {
     this.cleanseProgress = 0;
     this.cleanseTarget = -1;
 
-    // ---- 3. looting props
+    // ---- 3. chests
+    const chest = this.props.nearestChest(pos);
+    if (chest && chest.rarity) {
+      this.ui.setPrompt(`Open the ${chestRarityLabel(chest.rarity)} chest`, 'E');
+      if (pressedE) this.openChest();
+      return;
+    }
+
+    // ---- 4. looting props
     const prop = this.props.nearest(pos);
     if (prop && prop.kind !== 'campfire') {
       const label = prop.kind === 'bush' ? 'Forage the sunberry bush' : 'Open the supply cache';
@@ -1354,6 +1718,43 @@ export class Game {
     }
 
     if (this.player.mode === 'element') this.ui.setPrompt(null);
+  }
+
+  /**
+   * Keep the exit portal alive and handle stepping through it.
+   *
+   * The portal only exists once this world's Heart is restored, and travelling
+   * always saves first, so a transition can never lose progress.
+   */
+  private updatePortal(dt: number): void {
+    this.ensurePortal();
+    if (!this.portal) return;
+    this.portalPulse += dt;
+    if (this.portal.object) {
+      this.portal.object.rotation.y = Math.sin(this.portalPulse * 0.4) * 0.12;
+      const core = this.portal.object.children.find((c) => c.type === 'Mesh' && c.position.y > 2);
+      if (core) core.scale.setScalar(1 + Math.sin(this.portalPulse * 2.2) * 0.04);
+    }
+
+    const dx = this.player.position.x - this.portal.x;
+    const dz = this.player.position.z - this.portal.z;
+    if (dx * dx + dz * dz > 9) return;
+
+    const target = nextWorld(this.worldId);
+    const def = worldDef(this.worldId);
+    if (target) {
+      this.ui.setPrompt(`Step through the ${def.portal} to ${worldDef(target).name}`, 'E');
+      if (this.input.wasPressed('KeyE')) {
+        this.playStory(this.story.pending('world-transition'));
+        this.travelToWorld(target);
+      }
+    } else if (this.save && !this.save.postGame) {
+      this.ui.setPrompt('The final Heart is restored — take the last step', 'E');
+      if (this.input.wasPressed('KeyE')) this.completeCampaign();
+    } else {
+      this.ui.setPrompt(`Return to ${worldDef(WORLD_ORDER[0]!).name} and begin again, stronger`, 'E');
+      if (this.input.wasPressed('KeyE')) this.startNewGamePlus();
+    }
   }
 
   private lootProp(prop: ReturnType<Props['nearest']>): void {
@@ -1417,6 +1818,18 @@ export class Game {
     this.enemies.setCleansed(this.save.shrines);
     this.tracker.shrineCleansed = true;
 
+    // The first restored shrine awakens the element's Ultimate. Once unlocked
+    // it stays unlocked, across worlds, deaths and New Game Plus.
+    if (!this.ultimate.unlocked) {
+      this.ultimate.unlocked = true;
+      this.save.ultimateUnlocked = true;
+      this.ui.toast(
+        `${ELEMENTS[this.activeElement].ultimate.name} awakens — fill the meter, then middle-click or press R`,
+        'good', 5,
+      );
+      this.playStory(this.story.pending('first-heart'));
+    }
+
     this.audio.play('shrine-cleanse');
     this.player.addShake(0.5, 3);
     this.ui.elementFlash(ELEMENTS[SHRINE_SITES[index]!.element].color, 0.5);
@@ -1465,16 +1878,11 @@ export class Game {
 
   private finishUpgrade(): void {
     this.audio.play('ui-click');
-    if (this.save && allShrinesCleansed(this.save.shrines)) {
-      this.audio.play('victory');
-      this.ui.showVictory(
-        this.affinity, this.save.seed, this.worldMode,
-        this.accumulatedPlaytime, this.terrainMoved, this.enemies.kills,
-      );
-      this.setState('victory');
-      this.persist();
-      return;
-    }
+    // Restoring the last shrine of a world used to *be* the ending, back when
+    // there was one world. It now only opens the World Heart portal: the run
+    // continues, and the campaign ends at the portal in the final world so the
+    // final story beat and the post-game unlock go through completeCampaign().
+    if (this.save && allShrinesCleansed(this.save.shrines)) this.persist();
     this.setState('playing');
     this.input.requestLock();
   }
@@ -1483,10 +1891,12 @@ export class Game {
     this.shrines.markGuardianDefeated(index);
     if (this.save) {
       this.save.guardians[index] = true;
+      // Save immediately after a boss falls, so the win can never be lost.
       this.persist();
     }
     const site = SHRINE_SITES[index]!;
     this.ui.toast(`The guardian of the ${ELEMENTS[site.element].shrineName} falls`, 'good', 3.4);
+    this.playStory(this.story.pending('guardian-defeated'));
   }
 
   // ------------------------------------------------------------- combat
@@ -1496,6 +1906,10 @@ export class Game {
     const dealt = this.player.applyDamage(amount, from, knockback);
     if (dealt <= 0) return;
     notifyDamaged(this.healing);
+    // Surviving a hit feeds the Ultimate, but only up to a strict cap, so
+    // standing in fire is never a charging strategy.
+    this.addUltimateCharge('damage-taken', dealt);
+    notifyCombat(this.manaState);
     this.audio.play('hurt', 120);
     this.ui.damageFlash(0.3 + Math.min(0.5, dealt / 60));
     this.showDamageDirection(from.x, from.z);
@@ -1534,9 +1948,11 @@ export class Game {
       if (element) {
         // Go through the ability funnel so crits, elemental reactions,
         // lifesteal and upgrade behaviours all apply to projectiles too.
+        // The contact point matters: a shot into a weak point hits far harder.
         this.abilities.hitEnemy(
           enemy, p.damage, element, p.knockback ? kb : null, p.stagger ?? 0,
           p.burn ? { id: 'burning', seconds: 4, magnitude: p.burn } : undefined,
+          point,
         );
       } else {
         enemy.damage(p.damage, null, p.knockback ? kb : null, p.stagger ?? 0);
@@ -1674,6 +2090,398 @@ export class Game {
     }
   }
 
+  // ------------------------------------------------- safe respawn placement
+
+  /**
+   * A probe over the live world, used by the respawn resolver.
+   *
+   * Everything the resolver needs to reject a position - terrain, slope,
+   * hazards, water, scenery and creatures - is answered from the real game
+   * state, so a position it accepts is one the player can actually stand in.
+   */
+  private respawnProbe(): RespawnProbe {
+    const world = this.world;
+    const hazard = worldDef(this.worldId).hazard;
+    return {
+      inBounds: (x, y, z) => inWorld(x, y, z),
+      solidAt: (x, y, z) => world.isSolid(x, y, z),
+      normalYAt: (x, y, z) => {
+        world.normalAt(x, y, z, _v1);
+        return _v1.y;
+      },
+      damagingSurface: (x, y, z) => {
+        if (world.inHazardFluid(y)) return true;
+        if (hazard.kind === 'lava' && y <= world.fluidLevel + 0.6) return true;
+        return this.effects.damageAt(x, y, z) > 0;
+      },
+      insideFluid: (x, y, z) => {
+        void x; void z;
+        return y < world.fluidLevel;
+      },
+      sceneryOverlap: (x, y, z) =>
+        world.obstacles.overlaps(x, y, z, PLAYER_RADIUS + 0.05, PLAYER_HEIGHT),
+      creatureOverlap: (x, y, z) => {
+        _v2.set(x, y + PLAYER_HEIGHT * 0.5, z);
+        for (const e of this.enemies.live) {
+          if (!e.alive) continue;
+          if (e.pos.distanceToSquared(_v2) < (e.def.radius + PLAYER_RADIUS + 0.4) ** 2) return true;
+        }
+        return false;
+      },
+      hazardNearby: (x, y, z) => {
+        if (hazard.kind === 'lava') {
+          // Refuse a ledge that overhangs the lava line by less than the
+          // world's marked warning band.
+          for (let a = 0; a < 8; a++) {
+            const angle = (a / 8) * Math.PI * 2;
+            const hx = x + Math.cos(angle) * hazard.warningBand;
+            const hz = z + Math.sin(angle) * hazard.warningBand;
+            if (world.groundHeight(hx, hz) < world.fluidLevel + 0.4) return true;
+          }
+        }
+        return this.effects.damageAt(x, y, z) > 0;
+      },
+      columnHeight: (x, z) => world.groundHeight(x, z),
+    };
+  }
+
+  /** Resolve, then apply, a validated standing position. */
+  private placePlayerSafely(desired: readonly [number, number, number]): RespawnResult {
+    const spawn = this.world.spawn;
+    const result = resolveRespawn(
+      this.respawnProbe(),
+      desired,
+      [spawn.x, spawn.y, spawn.z],
+      WORLD_SIZE,
+    );
+    this.lastRespawn = result;
+    this.player.teleport(result.x, result.y, result.z);
+    // Belt and braces: the resolver has already validated the spot, but a
+    // final depenetration pass costs nothing and guarantees no overlap.
+    if (this.player.isStuck()) this.player.unstick();
+    this.lastPlayerPos.copy(this.player.position);
+    return result;
+  }
+
+  /** The checkpoint a respawn should start from. */
+  private checkpoint(): [number, number, number] {
+    const stored = this.save?.respawn;
+    if (stored && inWorld(stored[0], stored[1], stored[2])) return [...stored] as [number, number, number];
+    const spawn = this.world.spawn;
+    return [spawn.x, spawn.y, spawn.z];
+  }
+
+  // ------------------------------------------------- ultimate and mana
+
+  /** Feed the Ultimate meter, scaled by the build's charge-rate modifiers. */
+  private addUltimateCharge(source: ChargeSource, magnitude = 1): void {
+    const gained = addCharge(this.ultimate, source, magnitude, this.modifiers().ultimateGain);
+    if (gained > 0 && this.ultimate.justReady) this.announceUltimateReady();
+  }
+
+  private announceUltimateReady(): void {
+    this.audio.play('upgrade');
+    this.ui.toast('Ultimate ready — middle mouse or R', 'good', 2.6);
+    if (!this.settings.reducedFlashes) {
+      this.ui.elementFlash(ELEMENTS[this.activeElement].color, 0.28);
+    }
+  }
+
+  /** Combined permanent build and timed blessing modifiers. */
+  private modifiers(): ReturnType<typeof combineModifiers> {
+    return combineModifiers(this.run.build.modifiers, this.buffs.modifiers);
+  }
+
+  /** Add Mana, banking the overflow as a brief regeneration bonus. */
+  private grantMana(amount: number): void {
+    const result = absorbPickup(this.manaState, amount, this.player.energy, this.player.maxEnergy);
+    this.player.addEnergy(result.mana);
+  }
+
+  /** Fire the current element's Ultimate, if the meter allows it. */
+  private fireUltimate(): void {
+    const denial = ultimateDenial(this.ultimate);
+    if (denial) {
+      this.audio.play('deny', 140);
+      this.ui.toast(
+        denial === 'locked' ? 'Your Ultimate is not awakened yet'
+          : denial === 'cooldown' ? 'The current has not settled'
+            : `Ultimate charging — ${Math.round(this.ultimate.charge)}%`,
+        'warn', 1.4,
+      );
+      return;
+    }
+
+    const result = this.abilities.useUltimate(this.activeElement);
+    if (result !== 'ok') {
+      this.audio.play('deny', 140);
+      this.ui.toast('There is no room for that here', 'warn', 1.4);
+      return;
+    }
+
+    consumeUltimate(this.ultimate);
+    this.tracker.ultimateUsed = true;
+    // Short, non-disruptive activation: a beat of hit-stop and a flash, never
+    // a cutscene, and the player keeps control throughout.
+    this.hitStopTimer = Math.max(this.hitStopTimer, this.settings.reducedShake ? 0.05 : 0.12);
+    if (!this.settings.reducedFlashes) {
+      this.ui.elementFlash(ELEMENTS[this.activeElement].color, 0.45);
+    }
+    if (!this.settings.reducedShake) this.player.addShake(0.5, 4);
+    this.audio.play('upgrade');
+    this.persist();
+  }
+
+  // --------------------------------------------------------------- chests
+
+  /** Open the chest the player is standing at. */
+  private openChest(): void {
+    const prop = this.props.nearestChest(this.player.position);
+    if (!prop || !prop.rarity) return;
+    // A chest can only ever be taken once; `openChest` refuses a second time.
+    if (!this.props.openChest(prop)) {
+      this.audio.play('deny', 200);
+      this.ui.toast('This chest is already empty', 'warn', 1.4);
+      return;
+    }
+
+    const outcome = rollChestOutcome(
+      this.run.build,
+      {
+        elements: this.run.elements,
+        unlocked: this.run.unlocked,
+        depth: this.run.depth,
+        luck: RARITY_ORDER.indexOf(prop.rarity) * 0.6,
+        maxHealth: this.player.maxHealth,
+        maxMana: this.player.maxEnergy,
+      },
+      Math.random,
+      prop.rarity,
+    );
+
+    this.audio.play('shrine-cleanse');
+    this.audio.play('pickup', 220);
+    this.particles.spark({
+      count: 42, x: prop.position.x, y: prop.position.y + 1, z: prop.position.z,
+      spread: 0.6, vy: 3.2, jitter: 2.4,
+      color: RARITY_COLORS[outcome.rarity], color2: 0xffffff,
+      size: 0.36, life: 1.2, gravity: 0.8, drag: 0.8,
+    });
+    this.addPulseLight(prop.position.x, prop.position.y + 1.2, prop.position.z, RARITY_COLORS[outcome.rarity], 14, 0.8);
+
+    this.applyChestOutcome(outcome);
+    this.pendingChest = { outcome, propId: prop.id };
+
+    // Permanent gains are written to storage immediately, before the player
+    // has even dismissed the card.
+    if (this.save) this.save.lootedProps = this.props.lootedIds();
+    this.persist();
+
+    this.state = 'chest';
+    this.input.exitLock();
+    this.input.clearHeld();
+    this.ui.showChest(outcome, chestRarityLabel(outcome.rarity));
+  }
+
+  /** Apply what a chest contained. Never a no-op. */
+  private applyChestOutcome(outcome: ChestOutcome): void {
+    switch (outcome.kind) {
+      case 'upgrade':
+        if (outcome.upgradeId) {
+          this.run.build.add(outcome.upgradeId);
+          this.applyBuildToPlayer();
+        }
+        break;
+      case 'blessing':
+        if (outcome.buffId && CHEST_BUFFS[outcome.buffId]) {
+          this.buffs.apply(CHEST_BUFFS[outcome.buffId]!);
+          if (CHEST_BUFFS[outcome.buffId]!.grants?.includes('temp-shield')) {
+            this.player.grantShield(this.player.maxHealth * 0.3);
+          }
+          this.applyBuildToPlayer();
+        }
+        break;
+      default:
+        if (outcome.instant) {
+          if (outcome.instant.health) this.player.heal(outcome.instant.health);
+          if (outcome.instant.mana) this.grantMana(outcome.instant.mana);
+          if (outcome.instant.shield) this.player.grantShield(outcome.instant.shield);
+          if (outcome.instant.ultimate && this.ultimate.unlocked) {
+            this.addUltimateCharge('terrain', 1);
+            this.ultimate.charge = Math.min(100, this.ultimate.charge + outcome.instant.ultimate);
+          }
+        }
+        break;
+    }
+  }
+
+  private closeChest(): void {
+    if (this.state !== 'chest') return;
+    if (this.pendingChest) this.tracker.chestOpened = true;
+    this.pendingChest = null;
+    this.audio.play('ui-click');
+    this.setState('playing');
+    this.input.requestLock();
+  }
+
+  // ---------------------------------------------------------------- story
+
+  /**
+   * Queue a story beat.
+   *
+   * Blocking beats take over the screen and are only shown when the player is
+   * not in danger; quiet beats appear as a HUD banner and never interrupt.
+   * A beat that has been seen before is skippable immediately.
+   */
+  private playStory(beat: StoryBeat | null): void {
+    if (!beat) return;
+    if (this.story.has(beat.id) && !beat.blocking) return;
+
+    if (!beat.blocking) {
+      this.story.markSeen(beat.id);
+      this.ui.showStoryBanner(beat.title, beat.lines.join(' '), beat.seconds);
+      this.storyBannerTimer = beat.seconds;
+      this.persist();
+      return;
+    }
+
+    // Never interrupt an active fight with a long sequence.
+    if (this.enemies.hostilePressure(this.player.position, 26)) {
+      this.pendingStory = beat;
+      return;
+    }
+    this.pendingStory = null;
+    this.story.markSeen(beat.id);
+    this.persist();
+    this.input.exitLock();
+    this.input.clearHeld();
+    this.state = 'story';
+    this.ui.showStory(beat.title, beat.lines, this.story.skippable(beat.id));
+  }
+
+  private finishStory(): void {
+    if (this.state !== 'story') return;
+    this.audio.play('ui-click');
+    this.setState('playing');
+    this.input.requestLock();
+  }
+
+  // ------------------------------------------------------ world transition
+
+  /** Place this world's exit portal once its World Heart is restored. */
+  private ensurePortal(): void {
+    if (this.portal || !this.save) return;
+    if (!allShrinesCleansed(this.save.shrines)) return;
+
+    const def = worldDef(this.worldId);
+    const anchor = this.safeSpotNear(_v1.set(WORLD_CENTER, 0, WORLD_CENTER));
+    const build = buildPortal(ELEMENTS[this.activeElement].color);
+    build.group.position.set(anchor[0], anchor[1], anchor[2]);
+    this.props.group.add(build.group);
+    this.portal = { x: anchor[0], y: anchor[1], z: anchor[2], object: build.group };
+
+    // A portal is never deformable and never walk-through-able.
+    this.world.protectSphere(anchor[0], anchor[1] + 2, anchor[2], 7);
+    this.world.obstacles.add({
+      id: this.world.obstacles.reserveId(), kind: 'portal', shape: 'cylinder',
+      x: anchor[0], y: anchor[1], z: anchor[2],
+      radius: 2.4, height: 0.4, solid: false, protectedVolume: true,
+    });
+
+    this.ui.toast(`${def.portal} has opened at the heart of the world`, 'good', 5);
+    this.playStory(this.story.pending('world-transition'));
+  }
+
+  /**
+   * Travel to the next world.
+   *
+   * Everything the player has built is carried over untouched: affinity,
+   * Convergence state, every upgrade and chest reward, maximum health and Mana,
+   * the Ultimate unlock and its charge, inventory, currency and story progress.
+   * Only the terrain, the shrines and the current vitals are new.
+   */
+  private travelToWorld(target: WorldId): void {
+    if (!this.save) return;
+    const save = this.save;
+
+    // 1. save *before* leaving, so a failure here loses nothing.
+    this.persist();
+
+    if (!save.worldsCompleted.includes(this.worldId)) save.worldsCompleted.push(this.worldId);
+    save.worldHearts[this.worldId] = true;
+    this.worldsCompleted = [...save.worldsCompleted];
+
+    save.worldTheme = target;
+    save.checkpointWorld = target;
+    // A fresh world means fresh terrain and fresh shrines - and nothing else.
+    save.shrines = [false, false, false, false];
+    save.guardians = [false, false, false, false];
+    save.motes = [[false, false, false], [false, false, false], [false, false, false], [false, false, false]];
+    save.terrainOps = [];
+    save.lootedProps = [];
+    save.seed = randomSeed();
+    save.position = [WORLD_CENTER, 40, WORLD_CENTER];
+    save.respawn = [WORLD_CENTER, 40, WORLD_CENTER];
+    // Vitals are restored on arrival; maxima and upgrades are untouched.
+    save.health = -1;
+    save.energy = -1;
+    save.runStats.worldsReached = Math.max(save.runStats.worldsReached, worldIndex(target));
+
+    this.run.worldTheme = target;
+    this.portal = null;
+
+    if (!writeSave(window.localStorage, save)) {
+      this.ui.toast('Could not write the save - browser storage refused', 'bad', 4);
+      return;
+    }
+
+    this.pendingIsNew = false;
+    this.audio.play('shrine-cleanse');
+    this.beginLoad(save);
+  }
+
+  /** Reaching the end of the campaign: unlock the post-game, keep the build. */
+  private completeCampaign(): void {
+    if (!this.save) return;
+    const save = this.save;
+    if (!save.worldsCompleted.includes(this.worldId)) save.worldsCompleted.push(this.worldId);
+    save.worldHearts[this.worldId] = true;
+    save.postGame = true;
+    this.worldsCompleted = [...save.worldsCompleted];
+    this.persist();
+
+    this.playStory(this.story.pending('final-reveal'));
+    this.audio.play('victory');
+    this.ui.showVictory(
+      this.affinity, save.seed, this.worldMode,
+      this.accumulatedPlaytime, this.terrainMoved, this.enemies.kills,
+      true,
+    );
+    this.setState('victory');
+  }
+
+  /**
+   * New Game Plus, inside the same save.
+   *
+   * Explicitly *not* a new game: the affinity, every power, upgrade, chest
+   * reward, Ultimate unlock and statistic survive. Only the worlds are reset,
+   * harder than before.
+   */
+  private startNewGamePlus(): void {
+    if (!this.save) return;
+    const save = this.save;
+    save.newGamePlus += 1;
+    save.worldsCompleted = [];
+    save.worldHearts = {};
+    save.postGame = true;
+    this.worldsCompleted = [];
+    this.ui.toast(
+      `New Game Plus ${save.newGamePlus} — your build, affinity and Ultimate all carry over`,
+      'good', 5,
+    );
+    this.travelToWorld(WORLD_ORDER[0]!);
+  }
+
   // ------------------------------------------------------- death & save
 
   private onDeath(): void {
@@ -1689,28 +2497,40 @@ export class Game {
     if (this.save) this.persist();
   }
 
+  /**
+   * Respawn on validated standing room.
+   *
+   * The resolver checks the checkpoint first, then searches nearby, then the
+   * world spawn, then scans the world; whatever it returns has been verified
+   * as solid, walkable, clear of scenery, creatures and hazards, and with a
+   * full capsule of headroom. A short protection window then makes sure the
+   * player cannot be hit before they have their bearings.
+   */
   private respawn(): void {
     this.audio.play('ui-click');
-    const point = this.save?.respawn ?? [this.world.spawn.x, this.world.spawn.y, this.world.spawn.z];
-    let [x, y, z] = point;
-    if (!inWorld(x, y, z)) {
-      x = this.world.spawn.x; y = this.world.spawn.y; z = this.world.spawn.z;
-    }
-    this.player.teleport(x, y + 0.2, z);
-    this.player.unstick();
-    this.player.alive = true;
-    this.player.health = this.player.maxHealth;
-    this.player.energy = Math.max(0, this.player.maxEnergy * 0.6);
-    this.player.invulnTimer = 2;
-    this.player.breath = BREATH_SECONDS;
-    this.healing = createHealingState();
-    this.abilities.reset();
-    this.projectiles.clear();
 
+    // Clear the immediate area first, so the resolver is not trying to dodge
+    // creatures that are about to be removed anyway.
     for (const e of this.enemies.enemies) {
       if (e.shrineIndex >= 0) continue;
       if (e.pos.distanceTo(this.player.position) < 26) this.enemies.kill(e);
     }
+    this.projectiles.clear();
+
+    const result = this.placePlayerSafely(this.checkpoint());
+    this.player.alive = true;
+    this.player.health = this.player.maxHealth;
+    this.player.energy = Math.max(0, this.player.maxEnergy * 0.6);
+    this.player.protectAfterRespawn();
+    this.player.breath = this.player.maxBreath;
+    this.healing = createHealingState();
+    this.manaState = createManaState();
+    this.abilities.reset();
+
+    if (result.source !== 'checkpoint') {
+      this.ui.toast('Your checkpoint was unsafe — you wake on the nearest solid ground', 'warn', 3.4);
+    }
+    this.ui.toast('Protected for a moment', 'good', 2);
 
     this.setState('playing');
     this.input.requestLock();
@@ -1740,6 +2560,14 @@ export class Game {
     this.save.encounters = run.encounters;
     this.save.worldTheme = run.worldTheme;
     this.save.runStats = run.runStats;
+    // ---- the persistent build layer
+    this.save.worldsCompleted = [...this.worldsCompleted];
+    this.save.ultimateUnlocked = this.ultimate.unlocked;
+    this.save.ultimateCharge = this.ultimate.charge;
+    this.save.buffs = this.buffs.toJSON();
+    this.save.oxygen = this.player.breath;
+    this.save.story = this.story.toJSON();
+    this.save.checkpointWorld = this.worldId;
     if (!writeSave(window.localStorage, this.save)) {
       this.ui.toast('Could not write the save - browser storage refused', 'bad', 4);
     }
@@ -1814,9 +2642,85 @@ export class Game {
 
   /** Redraw the debug overlay. Cheap no-op while it is disabled. */
   private updateCombatDebug(dt: number): void {
+    if (this.collisionDebug.enabled) this.updateCollisionDebug();
     if (!this.combatDebug.enabled || !this.debugFrame) return;
     this.combatDebug.update(dt, this.debugFrame);
     this.ui.setCombatDebug(this.combatDebug.readout(this.debugFrame));
+  }
+
+  /**
+   * Development collision view: capsule, colliders, ground contact, overlap
+   * state, contact normal and the current safe respawn point.
+   */
+  private updateCollisionDebug(): void {
+    const pos = this.player.position;
+    // Resolve the respawn point live, so the marker always shows where a death
+    // right now would actually put the player.
+    if (!this.lastRespawn || this.frameCount % 30 === 0) {
+      this.lastRespawn = resolveRespawn(
+        this.respawnProbe(), this.checkpoint(),
+        [this.world.spawn.x, this.world.spawn.y, this.world.spawn.z], WORLD_SIZE,
+      );
+    }
+    const frame: CollisionFrame = {
+      x: pos.x, y: pos.y, z: pos.z,
+      onGround: this.player.onGround,
+      overlapping: this.player.isStuck(),
+      steep: this.player.contact.steep,
+      ceiling: this.player.contact.ceiling,
+      normal: { x: this.player.contact.nx, y: this.player.contact.ny, z: this.player.contact.nz },
+      respawn: this.lastRespawn
+        ? { x: this.lastRespawn.x, y: this.lastRespawn.y, z: this.lastRespawn.z }
+        : null,
+      respawnSource: this.lastRespawn?.source ?? 'none',
+      groundDensity: this.world.densityAt(pos.x, pos.y - 0.14, pos.z),
+      nearby: this.world.obstacles.query(pos.x, pos.z, 12),
+    };
+    this.collisionDebug.update(frame, this.world.obstacles);
+    this.ui.setCollisionDebug(this.collisionDebug.readout(frame));
+  }
+
+  /** One HUD entry per active ability, including the Ultimate. */
+  private abilityHud(): HudAbility[] {
+    const el = ELEMENTS[this.activeElement];
+    const slots: AbilitySlot[] = ['primary', 'secondary', 'technique'];
+    const out: HudAbility[] = slots.map((slot) => {
+      const def = slot === 'primary' ? el.primary : slot === 'secondary' ? el.secondary : el.technique;
+      const cost = this.abilities.costOf(this.activeElement, slot);
+      return {
+        name: def.name,
+        input: def.input,
+        cooldown: this.abilities.fraction(this.activeElement, slot),
+        cooldownSeconds: this.abilities.remaining(this.activeElement, slot),
+        ready: this.abilities.ready(this.activeElement, slot)
+          && this.abilities.affordable(this.activeElement, slot),
+        cost: isFreeCast(this.manaState) ? 0 : cost,
+        affordable: this.player.energy >= cost,
+      };
+    });
+    // The Ultimate never costs Mana: it spends its own meter.
+    out.push({
+      name: el.ultimate.name,
+      input: el.ultimate.input,
+      cooldown: this.ultimate.unlocked ? 1 - ultimateFraction(this.ultimate) : 1,
+      cooldownSeconds: this.ultimate.lockout,
+      ready: isUltimateReady(this.ultimate),
+      cost: 0,
+      affordable: true,
+    });
+    return out;
+  }
+
+  /** The line under the world name: what the player is meant to do next. */
+  private objectiveLine(): string {
+    const cleansed = this.save?.shrines.filter(Boolean).length ?? 0;
+    if (cleansed < SHRINE_SITES.length) {
+      return `Restore the ${worldDef(this.worldId).heart.name} · ${cleansed}/${SHRINE_SITES.length} shrines`;
+    }
+    const target = nextWorld(this.worldId);
+    if (target) return `${worldDef(this.worldId).portal} is open — travel to ${worldDef(target).name}`;
+    if (this.save?.postGame) return 'Post-game — the worlds stay open';
+    return 'The last Heart is restored — take the final step';
   }
 
   private updateHud(): void {
@@ -1824,6 +2728,23 @@ export class Game {
     const secondaryCd = this.abilities.fraction(this.activeElement, 'secondary');
     const effect = this.healing.effects[0] ?? null;
     const state: HudState = {
+      abilities: this.abilityHud(),
+      ultimateCharge: ultimateFraction(this.ultimate),
+      ultimateReady: isUltimateReady(this.ultimate),
+      ultimateUnlocked: this.ultimate.unlocked,
+      manaState: this.manaFeedback,
+      manaTerrainBonus: this.manaTerrainBonus,
+      oxygen: this.player.maxBreath > 0 ? this.player.breath / this.player.maxBreath : 1,
+      submerged: this.player.headInWater || this.player.breath < this.player.maxBreath - 0.05,
+      buffs: this.buffs.list().map((b) => ({
+        name: b.def.name,
+        color: b.def.color,
+        fraction: b.duration > 0 ? b.timeLeft / b.duration : 0,
+        penalty: b.def.penalty === true,
+      })),
+      permanentUpgrades: this.run.build.size,
+      worldName: worldDef(this.worldId).name,
+      objective: this.objectiveLine(),
       health: this.player.health,
       maxHealth: this.player.maxHealth,
       energy: this.player.energy,
@@ -1968,7 +2889,12 @@ export class Game {
     this.input.clearHeld();
     this.state = 'reward';
     this.audio.play('upgrade');
-    this.ui.showRewards(offers, this.run.build.synergies());
+    // Each card is given a full preview: exact effect lines and the before /
+    // after values of every stat it moves.
+    this.ui.showRewards(
+      offers.map((offer) => ({ ...offer, preview: previewOffer(this.run.build, offer.def) })),
+      this.run.build.synergies(),
+    );
   }
 
   private takeReward(id: string): void {
@@ -1988,20 +2914,154 @@ export class Game {
     this.input.requestLock();
   }
 
-  /** Push the run build's stat modifiers into the player. */
+  /**
+   * Push the combined build and blessing modifiers into the player.
+   *
+   * Called whenever the build changes - a reward, a chest, a blessing starting
+   * or expiring - and always with `keepRatios`, so raising or lowering the
+   * maximum never silently heals or kills the player.
+   */
   private applyBuildToPlayer(): void {
-    const m = this.run.build.modifiers;
+    const m = this.modifiers();
     const base = accumulateUpgrades(this.save?.upgrades ?? 0, isConvergence(this.affinity));
     const stats = {
       ...base,
-      maxHealth: base.maxHealth + m.maxHealth,
-      maxEnergy: base.maxEnergy + m.maxEnergy,
-      energyRegen: base.energyRegen + m.energyRegen,
+      maxHealth: (base.maxHealth + m.maxHealth) * m.maxHealthScale,
+      maxEnergy: (base.maxEnergy + m.maxEnergy) * m.maxEnergyScale,
+      energyRegen: (base.energyRegen + m.energyRegen) * m.regenScale,
       moveScale: base.moveScale * m.moveScale,
     };
     this.player.applyStats(stats, true);
     this.player.buildArmor = m.armor;
+    this.player.sprintScale = m.sprintScale;
+    this.player.bonusOxygen = m.oxygenCapacity;
+    this.player.oxygenDrainScale = m.oxygenDrain;
   }
+
+  // ------------------------------------------------------- development API
+
+  /**
+   * A snapshot of live game state.
+   *
+   * Used by the collision debug overlay and by the automated smoke test, which
+   * drives a real browser through a whole run. It only reads state.
+   */
+  debugSnapshot(): Record<string, unknown> {
+    // Before a world exists there is no density field to query, so anything
+    // that would touch it is reported as unknown rather than throwing.
+    const hasWorld = !!this.world.density;
+    return {
+      state: this.state,
+      hasWorld,
+      world: this.worldId,
+      worldName: worldDef(this.worldId).name,
+      affinity: this.affinity,
+      activeElement: this.activeElement,
+      position: [this.player.position.x, this.player.position.y, this.player.position.z],
+      onGround: this.player.onGround,
+      stuck: hasWorld ? this.player.isStuck() : false,
+      health: this.player.health,
+      maxHealth: this.player.maxHealth,
+      mana: this.player.energy,
+      maxMana: this.player.maxEnergy,
+      manaState: this.manaFeedback,
+      oxygen: this.player.breath,
+      maxOxygen: this.player.maxBreath,
+      submerged: this.player.headInWater,
+      inWater: this.player.inWater,
+      inAirPocket: this.player.inAirPocket,
+      onSlipperyGround: this.player.onSlipperyGround,
+      ultimateUnlocked: this.ultimate.unlocked,
+      ultimateCharge: this.ultimate.charge,
+      ultimateReady: isUltimateReady(this.ultimate),
+      build: this.run.build.toJSON(),
+      buffs: this.buffs.toJSON(),
+      obstacles: this.world.obstacles.size,
+      zones: this.effects.count,
+      deformations: this.effects.deformCount,
+      worldsCompleted: [...this.worldsCompleted],
+      story: this.story.toJSON(),
+      shrines: this.save?.shrines ?? [],
+      respawn: this.lastRespawn,
+      enemies: this.enemies.liveCount,
+      fluidLevel: this.world.fluidLevel,
+      fluidIsHazard: this.world.fluidIsHazard,
+    };
+  }
+
+  /**
+   * Development helpers used by the automated playthrough test.
+   *
+   * Every one of these drives the *real* code path rather than faking a
+   * result, so a passing smoke test means the feature genuinely works.
+   */
+  readonly debug = {
+    respawn: (): void => { this.player.alive = false; this.player.health = 0; },
+    forceRespawn: (): void => { this.respawn(); },
+    teleport: (x: number, y: number, z: number): void => { this.player.teleport(x, y, z); },
+    /**
+     * Drop the player into this world's fluid, `depth` metres under the
+     * surface, by finding a column that is genuinely deep enough. Returns
+     * false when the world has no such column.
+     */
+    diveIntoFluid: (depth = 4): boolean => {
+      const level = this.world.fluidLevel;
+      let bestX = 0;
+      let bestZ = 0;
+      let deepest = Infinity;
+      // Coarse grid over the whole world, keeping the deepest column found.
+      for (let x = 16; x < WORLD_SIZE - 16; x += 3) {
+        for (let z = 16; z < WORLD_SIZE - 16; z += 3) {
+          const ground = this.world.groundHeight(x, z);
+          if (ground <= 0 || ground >= deepest) continue;
+          deepest = ground;
+          bestX = x;
+          bestZ = z;
+        }
+      }
+      if (deepest > level - 1.5) return false;
+      const y = Math.max(deepest + 0.6, level - depth);
+      this.player.teleport(bestX, y, bestZ);
+      return true;
+    },
+    fillUltimate: (): void => {
+      this.ultimate.unlocked = true;
+      this.ultimate.charge = 100;
+      this.ultimate.lockout = 0;
+    },
+    fireUltimate: (): void => { this.fireUltimate(); },
+    useAbility: (slot: AbilitySlot): void => { this.fireAbility(slot); },
+    openNearestChest: (): boolean => {
+      const chest = this.props.nearestChest(this.player.position, 400);
+      if (!chest) return false;
+      this.player.teleport(chest.position.x, chest.position.y + 1, chest.position.z);
+      this.openChest();
+      return true;
+    },
+    cleanseAllShrines: (): void => {
+      if (!this.save) return;
+      for (let i = 0; i < SHRINE_SITES.length; i++) {
+        this.save.guardians[i] = true;
+        this.shrines.markGuardianDefeated(i);
+        if (!this.save.shrines[i]) this.cleanseShrine(i);
+      }
+      this.setState('playing');
+    },
+    travelNext: (): boolean => {
+      // The portal only fires from play, and so must this: calling it again
+      // mid-transition would stack world loads on top of each other.
+      if (this.state !== 'playing') return false;
+      const target = nextWorld(this.worldId);
+      if (target) this.travelToWorld(target);
+      else this.completeCampaign();
+      return true;
+    },
+    newGamePlus: (): void => { this.startNewGamePlus(); },
+    spendMana: (amount: number): void => { this.player.energy = Math.max(0, this.player.energy - amount); },
+    damage: (amount: number): void => { this.player.applyDamage(amount, null, 0, true); },
+    grantCharge: (source: ChargeSource, magnitude = 1): void => { this.addUltimateCharge(source, magnitude); },
+    snapshot: (): Record<string, unknown> => this.debugSnapshot(),
+  };
 
   private onResize(): void {
     this.viewportW = window.innerWidth;

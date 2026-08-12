@@ -446,3 +446,146 @@ describe('formatting helpers', () => {
     expect(timeAgo(0, now)).toBe('unknown');
   });
 });
+
+// =====================================================================
+//  Version 5: the persistent build layer
+// =====================================================================
+
+describe('migration from a version 4 save (before the persistent build layer)', () => {
+  const v4 = {
+    version: 4,
+    seed: 4242,
+    affinity: 'earth',
+    activeElement: 'earth',
+    worldMode: 'normal',
+    shrines: [true, false, false, false],
+    guardians: [true, false, false, false],
+    upgrades: 1,
+    position: [100, 26, 100],
+    respawn: [100, 26, 100],
+    health: 120,
+    energy: 60,
+    materials: { [Mat.STONE]: 12 },
+    items: { berries: 1 },
+    terrainOps: serialiseOps([op()]),
+    lootedProps: [4],
+    tutorialDone: true,
+    playtime: 900,
+    worldTheme: 'wilds',
+    build: { 'any-honed': 2, 'earth-stonehide': 1 },
+    depth: 5,
+    encounters: 5,
+    runStats: { enemiesFelled: 20, elitesFelled: 2, bossesFelled: 1, scenariosCompleted: 1, worldsReached: 1 },
+    meta: { echoes: 40, unlocked: ['world-depths'], runs: 1, bestDepth: 5, bossesFelled: 1 },
+  };
+
+  it('upgrades the version without losing anything', () => {
+    const result = validateSave(v4);
+    expect(result.ok).toBe(true);
+    const d = result.data!;
+    expect(d.version).toBe(SAVE_VERSION);
+    expect(d.affinity).toBe('earth');
+    expect(d.seed).toBe(4242);
+    expect(d.upgrades).toBe(1);
+    expect(d.health).toBe(120);
+    expect(d.build).toEqual({ 'any-honed': 2, 'earth-stonehide': 1 });
+    expect(d.depth).toBe(5);
+    expect(d.meta.echoes).toBe(40);
+    expect(opsFromSave(d)).toHaveLength(1);
+  });
+
+  it('starts the new layer from safe defaults', () => {
+    const d = validateSave(v4).data!;
+    expect(d.worldsCompleted).toEqual([]);
+    expect(d.worldHearts).toEqual({});
+    expect(d.buffs).toEqual([]);
+    expect(d.story).toEqual([]);
+    expect(d.postGame).toBe(false);
+    expect(d.newGamePlus).toBe(0);
+    expect(d.ultimateCharge).toBe(0);
+    expect(d.checkpointWorld).toBe('wilds');
+    // A save that already cleansed a shrine keeps its Ultimate unlocked.
+    expect(d.ultimateUnlocked).toBe(true);
+  });
+
+  it('never loads the player straight into a drowning death', () => {
+    const drowning = validateSave({ ...v4, oxygen: 0 }).data!;
+    expect(drowning.oxygen).toBeGreaterThan(0);
+  });
+});
+
+describe('version 5 fields', () => {
+  const base = createSave(11, 'fire', 'normal', [128, 30, 128], {}, {});
+
+  it('a new save starts with no persistent build layer', () => {
+    expect(base.worldsCompleted).toEqual([]);
+    expect(base.ultimateUnlocked).toBe(false);
+    expect(base.ultimateCharge).toBe(0);
+    expect(base.postGame).toBe(false);
+    expect(base.newGamePlus).toBe(0);
+    expect(base.story).toEqual([]);
+  });
+
+  it('round-trips completed worlds, hearts and the post-game flag', () => {
+    const save = {
+      ...base,
+      worldsCompleted: ['wilds', 'depths'],
+      worldHearts: { wilds: true },
+      postGame: true,
+      newGamePlus: 2,
+      ultimateUnlocked: true,
+      ultimateCharge: 42,
+      story: ['opening', 'intro-wilds'],
+      buffs: [{ id: 'buff-wrath', timeLeft: 10 }],
+      checkpointWorld: 'depths',
+    };
+    const d = validateSave(save).data!;
+    expect(d.worldsCompleted).toEqual(['wilds', 'depths']);
+    // A completed world always implies its Heart.
+    expect(d.worldHearts.wilds).toBe(true);
+    expect(d.worldHearts.depths).toBe(true);
+    expect(d.postGame).toBe(true);
+    expect(d.newGamePlus).toBe(2);
+    expect(d.ultimateUnlocked).toBe(true);
+    expect(d.ultimateCharge).toBe(42);
+    expect(d.story).toEqual(['opening', 'intro-wilds']);
+    expect(d.buffs).toEqual([{ id: 'buff-wrath', timeLeft: 10 }]);
+    expect(d.checkpointWorld).toBe('depths');
+  });
+
+  it('discards nonsense in the new fields rather than failing to load', () => {
+    const d = validateSave({
+      ...base,
+      worldsCompleted: ['wilds', 'not-a-world', 'wilds'],
+      worldHearts: { nope: true },
+      story: ['opening', 'not-a-beat'],
+      buffs: [{ id: 'not-a-buff', timeLeft: 5 }, 'rubbish'],
+      ultimateCharge: 9999,
+      newGamePlus: -3,
+    }).data!;
+    expect(d.worldsCompleted).toEqual(['wilds']);
+    expect(d.worldHearts).toEqual({ wilds: true });
+    expect(d.story).toEqual(['opening']);
+    expect(d.buffs).toEqual([]);
+    expect(d.ultimateCharge).toBe(100);
+    expect(d.newGamePlus).toBe(0);
+  });
+
+  it('keeps chest rewards, which live in the build, through a reload', () => {
+    const save = { ...base, build: { 'chest-double-damage': 1, 'any-hardy': 3 } };
+    const d = validateSave(save).data!;
+    expect(d.build['chest-double-damage']).toBe(1);
+    expect(d.build['any-hardy']).toBe(3);
+  });
+
+  it('carries the accessibility settings', () => {
+    const settings = validateSettings({
+      reducedFlashes: true, reducedShake: true, reducedDistortion: true, reducedParticles: true,
+    });
+    expect(settings.reducedFlashes).toBe(true);
+    expect(settings.reducedShake).toBe(true);
+    expect(settings.reducedDistortion).toBe(true);
+    expect(settings.reducedParticles).toBe(true);
+    expect(validateSettings({}).reducedFlashes).toBe(false);
+  });
+});

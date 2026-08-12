@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import type { World } from './World';
+import type { ObstacleField } from './Obstacles';
 import type { Particles } from '../fx/Particles';
 import type { EnemyManager } from '../combat/Enemies';
 import { ELEMENTS } from '../elements/elements';
@@ -48,6 +49,9 @@ export interface ShrineInteraction {
 
 const _tmp = new THREE.Vector3();
 
+/** Obstacle ids reserved for shrines, above flora and props. */
+export const SHRINE_OBSTACLE_ID_BASE = 900_000;
+
 export class ShrineManager {
   readonly group = new THREE.Group();
   readonly shrines: ShrineRuntime[] = [];
@@ -72,6 +76,24 @@ export class ShrineManager {
 
   get worldMode(): WorldMode {
     return this.mode;
+  }
+
+  /**
+   * Give each shrine's central pillar a collision volume and protect it from
+   * deformation, so an objective can never be dug away or walked through.
+   */
+  registerObstacles(field: ObstacleField): void {
+    for (const shrine of this.shrines) {
+      const id = SHRINE_OBSTACLE_ID_BASE + shrine.site.index;
+      field.remove(id);
+      field.add({
+        id, kind: 'shrine', shape: 'cylinder',
+        x: shrine.anchor.x, y: shrine.anchor.y - 0.2, z: shrine.anchor.z,
+        radius: 1.35, height: 3.4,
+        solid: true, protectedVolume: true,
+      });
+      this.world.protectSphere(shrine.anchor.x, shrine.anchor.y + 2, shrine.anchor.z, 6);
+    }
   }
 
   build(

@@ -16,6 +16,10 @@ import {
   applyWind, makeCanopyGeometry, makeConiferGeometry, makeTrunkGeometry,
 } from '../render/models';
 import type { World } from './World';
+import type { ObstacleField } from './Obstacles';
+
+/** Obstacle ids for flora start at 0; props start at their own base. */
+export const OBSTACLE_ID_BASE = 0;
 
 interface Placement {
   x: number;
@@ -46,6 +50,8 @@ export class Flora {
   private materials: THREE.Material[] = [];
   private geometries: THREE.BufferGeometry[] = [];
   private alive: boolean[] = [];
+  /** Collision registry, so a felled tree loses its volume immediately. */
+  private obstacleField: ObstacleField | null = null;
 
   constructor() {
     this.group.name = 'flora';
@@ -188,6 +194,35 @@ export class Flora {
   }
 
   /**
+   * Give every trunk a matching collision cylinder.
+   *
+   * Trees were previously drawn but never collided with, so the player walked
+   * straight through them. The cylinder matches the visible trunk radius, and
+   * only the trunk is solid - the canopy overhead is deliberately passable, so
+   * there are no invisible walls where the leaves are.
+   */
+  registerObstacles(field: ObstacleField): void {
+    this.obstacleField = field;
+    const add = (list: Placement[], offset: number, conifer: boolean): void => {
+      for (let i = 0; i < list.length; i++) {
+        const p = list[i]!;
+        const id = OBSTACLE_ID_BASE + offset + i;
+        field.remove(id);
+        if (!this.alive[offset + i]) continue;
+        field.add({
+          id, kind: conifer ? 'conifer' : 'tree', shape: 'cylinder',
+          x: p.x, y: p.y - 0.4, z: p.z,
+          radius: (conifer ? 0.32 : 0.38) * p.scale,
+          height: (conifer ? 4.6 : 3.8) * p.scale,
+          solid: true, destructible: true,
+        });
+      }
+    };
+    add(this.placements, 0, false);
+    add(this.coniferPlacements, this.placements.length, true);
+  }
+
+  /**
    * Remove any tree whose roots the player has excavated, so nothing is left
    * hanging in mid-air over a fresh tunnel.
    */
@@ -205,6 +240,9 @@ export class Flora {
         // Still rooted? Sample just under the trunk base.
         if (world.isSolid(p.x, p.y - 0.5, p.z)) continue;
         this.alive[offset + i] = false;
+        // The collision volume has to go with the visual, immediately, or the
+        // player walks into a tree that is no longer there.
+        this.obstacleField?.remove(OBSTACLE_ID_BASE + offset + i);
         _pos.set(p.x, -999, p.z);
         _quat.identity();
         _scale.setScalar(0.0001);

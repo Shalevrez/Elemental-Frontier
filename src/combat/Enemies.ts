@@ -29,8 +29,42 @@ import { AIM, REACTION } from './combatConfig';
 import { SEA_LEVEL, WORLD_CENTER, WORLD_SIZE } from '../world/coords';
 import { SPAWN_PLAZA_RADIUS } from '../world/density';
 import {
-  buildCrawler, buildGuardian, buildWisp, geoPickup, type CreatureBuild,
+  buildBurrower, buildCrawler, buildGuardian, buildRootHunter, buildShellback,
+  buildSpirit, buildSpitter, buildStoneBeast, buildWisp, geoPickup,
+  type CreatureBuild,
 } from '../render/models';
+import type { BodyPlan } from './enemyTypes';
+
+/** Build the sculpted body for a plan. */
+function buildBody(plan: BodyPlan, accent: number, body: number): CreatureBuild {
+  switch (plan) {
+    case 'wisp': return buildWisp(accent);
+    case 'guardian': return buildGuardian(accent);
+    case 'root-hunter': return buildRootHunter(accent, body);
+    case 'stone-beast': return buildStoneBeast(accent, body);
+    case 'spitter': return buildSpitter(accent, body);
+    case 'shellback': return buildShellback(accent, body);
+    case 'spirit': return buildSpirit(accent, body);
+    case 'burrower': return buildBurrower(accent, body);
+    default: return buildCrawler(accent);
+  }
+}
+
+/**
+ * Height each body plan is modelled at, so a creature's declared height scales
+ * it correctly instead of every plan sharing one fudge factor.
+ */
+const BODY_REFERENCE_HEIGHT: Record<BodyPlan, number> = {
+  crawler: 1.0,
+  wisp: 1.4,
+  guardian: 4.0,
+  'root-hunter': 1.5,
+  'stone-beast': 1.5,
+  spitter: 1.85,
+  shellback: 1.25,
+  spirit: 1.3,
+  burrower: 1.1,
+};
 
 export type EnemyKind = TypeKind;
 export type EnemyState = 'idle' | 'detect' | 'chase' | 'telegraph' | 'attack' | 'hurt' | 'dead';
@@ -104,6 +138,7 @@ const _up = new THREE.Vector3(0, 1, 0);
 const _expired: StatusId[] = [];
 let nextEnemyUid = 1;
 const _probe: Vec3 = { x: 0, y: 0, z: 0 };
+const _weak = new THREE.Vector3();
 
 export class Enemy {
   readonly def: EnemyDef;
@@ -162,6 +197,8 @@ export class Enemy {
   dissolving = false;
 
   private build: CreatureBuild;
+  /** Which sculpted silhouette this creature was built from. */
+  bodyPlan: BodyPlan = 'crawler';
   private bar: THREE.Group | null = null;
   private barFg: THREE.Mesh | null = null;
   private barTimer = 0;
@@ -192,18 +229,51 @@ export class Enemy {
     this.pos.copy(position);
     this.group.position.copy(position);
 
-    // Silhouette by role: light skirmishers, floaters and heavies read
-    // differently at a glance, which is what makes them identifiable.
+    // Silhouette by body plan: each world's creatures are built from different
+    // geometry, not tinted copies of one another.
     const loco = this.type.locomotion;
-    this.build = loco === 'hover'
-      ? buildWisp(this.accent)
-      : this.type.role === 'tank' || this.type.role === 'boss' || kind === 'guardian'
-        ? buildGuardian(this.accent)
-        : buildCrawler(this.accent);
-    const scale = this.type.height / (loco === 'hover' ? 1.4 : this.type.role === 'tank' || kind === 'guardian' ? 4.0 : 1.0);
+    const plan: BodyPlan = this.type.bodyPlan
+      ?? (loco === 'hover'
+        ? 'wisp'
+        : this.type.role === 'tank' || this.type.role === 'boss' || kind === 'guardian'
+          ? 'guardian'
+          : 'crawler');
+    this.bodyPlan = plan;
+    this.build = buildBody(plan, this.accent, this.type.body);
+
+    const referenceHeight = BODY_REFERENCE_HEIGHT[plan];
+    const scale = this.type.height / referenceHeight;
     this.build.group.scale.setScalar(Math.max(0.55, scale));
     this.group.add(this.build.group);
     for (const mat of this.build.materials) this.baseColors.push(mat.color.getHex());
+  }
+
+  /**
+   * World-space position of this creature's weak point, or null when it has
+   * none. Hits landing near it deal `weakPointMultiplier` times damage.
+   */
+  weakPointAt(out: THREE.Vector3): THREE.Vector3 | null {
+    const local = this.build.weakPoint;
+    if (!local || !this.type.weakPointMultiplier) return null;
+    const scale = this.build.group.scale.x;
+    return out.set(
+      this.pos.x + local.x * scale,
+      this.pos.y + local.y * scale,
+      this.pos.z + local.z * scale,
+    );
+  }
+
+  /** Damage multiplier for a hit landing at this world position. */
+  weakPointBonus(x: number, y: number, z: number): number {
+    const multiplier = this.type.weakPointMultiplier;
+    if (!multiplier) return 1;
+    const point = this.weakPointAt(_weak);
+    if (!point) return 1;
+    const reach = Math.max(0.32, this.def.radius * 0.62);
+    const dx = point.x - x;
+    const dy = point.y - y;
+    const dz = point.z - z;
+    return dx * dx + dy * dy + dz * dz <= reach * reach ? multiplier : 1;
   }
 
   private ensureBar(): void {
@@ -227,6 +297,28 @@ export class Enemy {
   showBar(seconds = 3): void {
     this.ensureBar();
     this.barTimer = Math.max(this.barTimer, seconds);
+  }
+
+  /** How hard this creature is to move. Light ones are dragged by wind. */
+  get knockbackResist(): number {
+    return this.type.knockbackResist;
+  }
+
+  /**
+   * Cancel an attack that is still winding up.
+   *
+   * Control abilities - Tidal Pull, a stun, a heavy stagger - use this so
+   * interrupting a telegraphed swing is a real, visible outcome rather than
+   * merely delaying it. Returns true when something was actually interrupted.
+   */
+  interrupt(): boolean {
+    if (this.state !== 'telegraph') return false;
+    this.telegraphTimer = 0;
+    this.telegraphTotal = 0;
+    this.pendingAttack = -1;
+    this.state = 'hurt';
+    this.stateTime = 0;
+    return true;
   }
 
   damage(amount: number, element: ElementId | null, knockback: THREE.Vector3 | null, stagger = 0): number {

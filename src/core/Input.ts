@@ -19,6 +19,16 @@ export class Input {
   locked = false;
   sensitivity = 1;
 
+  /**
+   * Middle-button clicks and wheel notches this frame.
+   *
+   * Kept as two separate counters on purpose: the Ultimate reads
+   * `middleClicks`, terrain material cycling reads `wheelDelta`, and scrolling
+   * the wheel can therefore never trigger an Ultimate.
+   */
+  middleClicks = 0;
+  wheelEvents = 0;
+
   /** Called when pointer lock is lost so the game can pause. */
   onPointerLockLost: (() => void) | null = null;
   /** Called with the raw event on any key press (used for menu shortcuts). */
@@ -48,8 +58,20 @@ export class Input {
 
   private readonly handleMouseDown = (e: MouseEvent): void => {
     if (!this.locked) return;
+    // Button 1 is the middle *click*. It is a completely separate input from
+    // wheel scrolling, which arrives through `handleWheel` and only ever
+    // changes `wheelDelta` - so the Ultimate can never fire from a scroll.
+    if (e.button === 1) {
+      e.preventDefault();
+      this.middleClicks++;
+    }
     this.mouseHeld.add(e.button);
     this.mousePressed.add(e.button);
+  };
+
+  private readonly handleAuxClick = (e: MouseEvent): void => {
+    // Stops the browser's middle-click autoscroll from hijacking the button.
+    if (e.button === 1) e.preventDefault();
   };
 
   private readonly handleMouseUp = (e: MouseEvent): void => {
@@ -66,6 +88,7 @@ export class Input {
   private readonly handleWheel = (e: WheelEvent): void => {
     if (!this.locked) return;
     this.wheelDelta += e.deltaY;
+    this.wheelEvents++;
     e.preventDefault();
   };
 
@@ -100,6 +123,7 @@ export class Input {
     window.addEventListener('keyup', this.handleKeyUp);
     window.addEventListener('mousedown', this.handleMouseDown);
     window.addEventListener('mouseup', this.handleMouseUp);
+    window.addEventListener('auxclick', this.handleAuxClick);
     window.addEventListener('mousemove', this.handleMouseMove);
     window.addEventListener('wheel', this.handleWheel, { passive: false });
     window.addEventListener('blur', this.handleBlur);
@@ -114,6 +138,7 @@ export class Input {
     window.removeEventListener('keyup', this.handleKeyUp);
     window.removeEventListener('mousedown', this.handleMouseDown);
     window.removeEventListener('mouseup', this.handleMouseUp);
+    window.removeEventListener('auxclick', this.handleAuxClick);
     window.removeEventListener('mousemove', this.handleMouseMove);
     window.removeEventListener('wheel', this.handleWheel);
     window.removeEventListener('blur', this.handleBlur);
@@ -121,13 +146,28 @@ export class Input {
     this.element.removeEventListener('contextmenu', this.handleContextMenu);
   }
 
+  /**
+   * Whether the game currently wants the pointer captured.
+   *
+   * Pointer lock is granted asynchronously, so a request made just before a
+   * screen opens could otherwise resolve *after* the screen is up and leave
+   * the player unable to click anything. This flag lets a late grant be
+   * released immediately.
+   */
+  private wantsLock = false;
+
   requestLock(): void {
+    this.wantsLock = true;
     if (this.locked) return;
     const el = this.element as HTMLElement & { requestPointerLock?: () => Promise<void> | void };
     try {
       const result = el.requestPointerLock?.();
-      if (result && typeof (result as Promise<void>).catch === 'function') {
-        (result as Promise<void>).catch(() => { /* browser refused; menu stays open */ });
+      if (result && typeof (result as Promise<void>).then === 'function') {
+        (result as Promise<void>)
+          .then(() => {
+            if (!this.wantsLock && document.pointerLockElement) document.exitPointerLock();
+          })
+          .catch(() => { /* browser refused; menu stays open */ });
       }
     } catch {
       /* ignore - the user can click again */
@@ -135,8 +175,15 @@ export class Input {
   }
 
   exitLock(): void {
+    this.wantsLock = false;
     if (document.pointerLockElement) document.exitPointerLock();
   }
+
+  /** True when the middle mouse button was *clicked* this frame. */
+  middleClicked(): boolean { return this.middleClicks > 0; }
+
+  /** True when the wheel was scrolled this frame. Never an Ultimate input. */
+  wheelScrolled(): boolean { return this.wheelEvents > 0; }
 
   isDown(code: string): boolean { return this.held.has(code); }
   wasPressed(code: string): boolean { return this.pressed.has(code); }
@@ -154,6 +201,8 @@ export class Input {
     this.mouseDX = 0;
     this.mouseDY = 0;
     this.wheelDelta = 0;
+    this.middleClicks = 0;
+    this.wheelEvents = 0;
   }
 
   /** Drop all held state (used when the game pauses). */

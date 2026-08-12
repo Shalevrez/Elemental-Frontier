@@ -169,6 +169,13 @@ export interface CreatureBuild {
   animated: THREE.Object3D[];
   /** Emissive parts that carry the accent colour. */
   glow: THREE.MeshStandardMaterial;
+  /**
+   * Local-space offset of the creature's weak point, if it has one.
+   *
+   * Hits landing here count for extra damage, so "aim for the exposed core"
+   * is a real tactic rather than flavour text.
+   */
+  weakPoint?: { x: number; y: number; z: number };
 }
 
 const sharedGeo = {
@@ -597,6 +604,311 @@ export function buildShrine(index: number, element: ElementId, cleansed: boolean
   return { group, materials, animated, core, coreHeight };
 }
 
+// =====================================================================
+//  World-specific body plans
+//
+//  Six additional silhouettes, so the creatures of each world read
+//  differently at a glance: long-limbed root hunters, plated stone beasts,
+//  rooted spitters, domed shell-backs, ribbon spirits and segmented burrowers.
+//  None of them is a recolour of another - the proportions, the materials and
+//  the moving parts are all different.
+// =====================================================================
+
+/**
+ * Root-bound hunter: tall, spindly, four long legs and a low-slung body that
+ * hangs between them. Reads as a spider-stalker at any distance.
+ */
+export function buildRootHunter(accent: number, body = 0x3d4a28): CreatureBuild {
+  const group = new THREE.Group();
+  const bark = bodyMaterial(body, 0.94);
+  const dark = bodyMaterial(0x1e2714, 0.96);
+  const glow = glowMaterial(accent, 2.4);
+  const materials = [bark, dark, glow];
+  const animated: THREE.Object3D[] = [];
+
+  const hull = new THREE.Mesh(
+    cached('root-hull', () => {
+      const g = new THREE.IcosahedronGeometry(0.42, 1);
+      g.scale(1.1, 0.6, 1.5);
+      return g;
+    }),
+    bark,
+  );
+  hull.position.y = 1.05;
+  hull.castShadow = true;
+  group.add(hull);
+
+  // Four long legs, jointed upward then down - the defining silhouette.
+  for (let i = 0; i < 4; i++) {
+    const side = i < 2 ? -1 : 1;
+    const front = i % 2 === 0 ? -1 : 1;
+    const limb = new THREE.Group();
+    limb.position.set(side * 0.34, 1.02, front * 0.42);
+    const upper = new THREE.Mesh(
+      cached('root-upper', () => new THREE.CapsuleGeometry(0.07, 0.62, 4, 6)), dark,
+    );
+    upper.position.set(side * 0.28, 0.16, 0);
+    upper.rotation.z = side * -0.9;
+    limb.add(upper);
+    const lower = new THREE.Mesh(
+      cached('root-lower', () => new THREE.CapsuleGeometry(0.055, 0.78, 4, 6)), dark,
+    );
+    lower.position.set(side * 0.56, -0.42, 0);
+    lower.rotation.z = side * 0.34;
+    limb.add(lower);
+    limb.castShadow = true;
+    group.add(limb);
+    animated.push(limb);
+  }
+
+  const head = new THREE.Mesh(
+    cached('root-head', () => new THREE.ConeGeometry(0.22, 0.5, 6)), dark,
+  );
+  head.position.set(0, 1.02, -0.86);
+  head.rotation.x = -Math.PI / 2;
+  group.add(head);
+
+  // The exposed heartwood is the weak point.
+  const core = new THREE.Mesh(cached('root-core', () => new THREE.SphereGeometry(0.14, 8, 6)), glow);
+  core.position.set(0, 1.14, 0.24);
+  group.add(core);
+  animated.push(core);
+
+  return { group, materials, animated, glow, weakPoint: { x: 0, y: 1.14, z: 0.24 } };
+}
+
+/**
+ * Plated stone beast: a heavy, wide quadruped built from slabs, with a glowing
+ * seam down its flank where the plates have cracked apart.
+ */
+export function buildStoneBeast(accent: number, body = 0x5b5f63): CreatureBuild {
+  const group = new THREE.Group();
+  const stone = bodyMaterial(body, 0.98);
+  const dark = bodyMaterial(0x2b2f33, 0.99);
+  const glow = glowMaterial(accent, 2.8);
+  const materials = [stone, dark, glow];
+  const animated: THREE.Object3D[] = [];
+
+  const hull = new THREE.Mesh(cached('stone-hull', () => new THREE.BoxGeometry(1.05, 0.72, 1.6)), stone);
+  hull.position.y = 0.78;
+  hull.castShadow = true;
+  group.add(hull);
+
+  for (const [ox, oy, oz, s] of [[0, 0.42, -0.5, 0.5], [-0.5, 0.3, 0.2, 0.42], [0.5, 0.3, 0.2, 0.42]] as const) {
+    const slab = new THREE.Mesh(cached('stone-slab', () => new THREE.BoxGeometry(0.7, 0.24, 0.9)), dark);
+    slab.position.set(ox, 0.78 + oy, oz);
+    slab.scale.setScalar(s + 0.5);
+    slab.rotation.y = ox * 0.4;
+    group.add(slab);
+  }
+
+  for (let i = 0; i < 4; i++) {
+    const side = i < 2 ? -1 : 1;
+    const front = i % 2 === 0 ? -1 : 1;
+    const leg = new THREE.Mesh(cached('stone-leg', () => new THREE.BoxGeometry(0.26, 0.62, 0.3)), dark);
+    leg.position.set(side * 0.42, 0.31, front * 0.56);
+    leg.castShadow = true;
+    group.add(leg);
+    animated.push(leg);
+  }
+
+  const head = new THREE.Mesh(cached('stone-head', () => new THREE.BoxGeometry(0.5, 0.42, 0.56)), stone);
+  head.position.set(0, 0.82, -0.98);
+  group.add(head);
+
+  // Cracked seam: hitting it bypasses the plating.
+  const seam = new THREE.Mesh(cached('stone-seam', () => new THREE.BoxGeometry(0.12, 0.4, 1.1)), glow);
+  seam.position.set(0, 1.14, 0.1);
+  group.add(seam);
+  animated.push(seam);
+
+  return { group, materials, animated, glow, weakPoint: { x: 0, y: 1.14, z: 0.1 } };
+}
+
+/**
+ * Rooted spitter: a plant that cannot walk. A thick stalk, a heavy bulb head
+ * that tracks the player, and a fan of leaves at the base.
+ */
+export function buildSpitter(accent: number, body = 0x2f5c33): CreatureBuild {
+  const group = new THREE.Group();
+  const stem = bodyMaterial(body, 0.95);
+  const bulbMat = glowMaterial(accent, 1.6);
+  const leafMat = bodyMaterial(0x1f4023, 0.98);
+  const materials = [stem, bulbMat, leafMat];
+  const animated: THREE.Object3D[] = [];
+
+  const stalk = new THREE.Mesh(
+    cached('spit-stalk', () => new THREE.CylinderGeometry(0.14, 0.28, 1.35, 8)), stem,
+  );
+  stalk.position.y = 0.68;
+  stalk.castShadow = true;
+  group.add(stalk);
+
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2;
+    const leaf = new THREE.Mesh(cached('spit-leaf', () => {
+      const g = new THREE.ConeGeometry(0.2, 0.8, 5);
+      g.rotateX(Math.PI / 2);
+      return g;
+    }), leafMat);
+    leaf.position.set(Math.cos(a) * 0.36, 0.16, Math.sin(a) * 0.36);
+    leaf.rotation.set(0.8, -a, 0);
+    group.add(leaf);
+    animated.push(leaf);
+  }
+
+  // The bulb is both the mouth and the weak point.
+  const bulb = new THREE.Mesh(cached('spit-bulb', () => {
+    const g = new THREE.SphereGeometry(0.34, 10, 8);
+    g.scale(1, 1.15, 1);
+    return g;
+  }), bulbMat);
+  bulb.position.y = 1.52;
+  group.add(bulb);
+  animated.push(bulb);
+
+  return { group, materials, animated, glow: bulbMat, weakPoint: { x: 0, y: 1.52, z: 0 } };
+}
+
+/**
+ * Shell-armoured crawler: a low dome over a squat body. The shell blocks
+ * frontal damage; the soft underside is the answer.
+ */
+export function buildShellback(accent: number, body = 0x3a5560): CreatureBuild {
+  const group = new THREE.Group();
+  const shell = bodyMaterial(body, 0.6);
+  shell.metalness = 0.25;
+  const flesh = bodyMaterial(0x7a5a52, 0.9);
+  const glow = glowMaterial(accent, 2.2);
+  const materials = [shell, flesh, glow];
+  const animated: THREE.Object3D[] = [];
+
+  const under = new THREE.Mesh(cached('shell-under', () => {
+    const g = new THREE.SphereGeometry(0.6, 12, 8);
+    g.scale(1, 0.5, 1.1);
+    return g;
+  }), flesh);
+  under.position.y = 0.42;
+  group.add(under);
+
+  const dome = new THREE.Mesh(cached('shell-dome', () => {
+    const g = new THREE.SphereGeometry(0.74, 14, 10, 0, Math.PI * 2, 0, Math.PI / 2);
+    g.scale(1, 0.78, 1.16);
+    return g;
+  }), shell);
+  dome.position.y = 0.5;
+  dome.castShadow = true;
+  group.add(dome);
+
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2;
+    const ridge = new THREE.Mesh(cached('shell-ridge', () => new THREE.ConeGeometry(0.09, 0.3, 5)), shell);
+    ridge.position.set(Math.cos(a) * 0.5, 0.72, Math.sin(a) * 0.6);
+    ridge.rotation.z = Math.cos(a) * 0.5;
+    group.add(ridge);
+  }
+
+  for (let i = 0; i < 6; i++) {
+    const side = i < 3 ? -1 : 1;
+    const along = (i % 3) - 1;
+    const leg = new THREE.Mesh(cached('shell-leg', () => new THREE.CapsuleGeometry(0.06, 0.26, 4, 6)), flesh);
+    leg.position.set(side * 0.56, 0.16, along * 0.4);
+    leg.rotation.z = side * 0.7;
+    group.add(leg);
+    animated.push(leg);
+  }
+
+  const eye = new THREE.Mesh(geoEye(), glow);
+  eye.position.set(0, 0.44, -0.7);
+  group.add(eye);
+
+  // Soft underside, reachable from behind or below.
+  return { group, materials, animated, glow, weakPoint: { x: 0, y: 0.3, z: 0.45 } };
+}
+
+/**
+ * Ribbon spirit: no legs and no solid body - a drifting core wrapped in
+ * trailing ribbons. Silhouette is entirely vertical motion.
+ */
+export function buildSpirit(accent: number, body = 0x1d3c52): CreatureBuild {
+  const group = new THREE.Group();
+  const veil = new THREE.MeshStandardMaterial({
+    color: body, emissive: new THREE.Color(accent), emissiveIntensity: 0.7,
+    roughness: 0.3, transparent: true, opacity: 0.55, side: THREE.DoubleSide,
+  });
+  const glow = glowMaterial(accent, 3.2);
+  const materials = [veil, glow];
+  const animated: THREE.Object3D[] = [];
+
+  const core = new THREE.Mesh(cached('spirit-core', () => new THREE.OctahedronGeometry(0.3, 1)), glow);
+  core.position.y = 1.0;
+  group.add(core);
+  animated.push(core);
+
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2;
+    const ribbon = new THREE.Mesh(cached('spirit-ribbon', () => {
+      const g = new THREE.PlaneGeometry(0.22, 1.5, 1, 4);
+      g.translate(0, -0.75, 0);
+      return g;
+    }), veil);
+    ribbon.position.set(Math.cos(a) * 0.28, 0.98, Math.sin(a) * 0.28);
+    ribbon.rotation.y = -a;
+    group.add(ribbon);
+    animated.push(ribbon);
+  }
+
+  return { group, materials, animated, glow, weakPoint: { x: 0, y: 1.0, z: 0 } };
+}
+
+/**
+ * Segmented burrower: a chain of tapering rings with a mandibled head. Built
+ * to read as "something long that just came out of the ground".
+ */
+export function buildBurrower(accent: number, body = 0x4a3320): CreatureBuild {
+  const group = new THREE.Group();
+  const hide = bodyMaterial(body, 0.88);
+  const plate = bodyMaterial(0x2a1c10, 0.92);
+  const glow = glowMaterial(accent, 2.6);
+  const materials = [hide, plate, glow];
+  const animated: THREE.Object3D[] = [];
+
+  for (let i = 0; i < 6; i++) {
+    const t = i / 5;
+    const seg = new THREE.Mesh(
+      cached('burrow-seg', () => new THREE.SphereGeometry(0.34, 10, 8)), i % 2 === 0 ? hide : plate,
+    );
+    seg.position.set(0, 0.5 + Math.sin(t * 2.2) * 0.16, 0.42 + t * 1.1);
+    seg.scale.setScalar(1 - t * 0.45);
+    seg.castShadow = true;
+    group.add(seg);
+    animated.push(seg);
+  }
+
+  const head = new THREE.Mesh(cached('burrow-head', () => {
+    const g = new THREE.ConeGeometry(0.36, 0.78, 8);
+    g.rotateX(-Math.PI / 2);
+    return g;
+  }), plate);
+  head.position.set(0, 0.56, -0.3);
+  head.castShadow = true;
+  group.add(head);
+
+  for (const side of [-1, 1]) {
+    const mandible = new THREE.Mesh(cached('burrow-mand', () => new THREE.ConeGeometry(0.08, 0.44, 5)), hide);
+    mandible.position.set(side * 0.2, 0.5, -0.6);
+    mandible.rotation.set(-1.3, 0, side * 0.5);
+    group.add(mandible);
+    animated.push(mandible);
+  }
+
+  const maw = new THREE.Mesh(cached('burrow-maw', () => new THREE.SphereGeometry(0.14, 8, 6)), glow);
+  maw.position.set(0, 0.56, -0.62);
+  group.add(maw);
+
+  return { group, materials, animated, glow, weakPoint: { x: 0, y: 0.56, z: -0.62 } };
+}
+
 // ------------------------------------------------------------------ props
 
 export interface PropBuild {
@@ -704,6 +1016,110 @@ export function buildSupplyCache(): PropBuild {
   group.add(band);
 
   return { group, materials, animated: [band] };
+}
+
+/**
+ * A reward chest.
+ *
+ * Its banding, glow and the crown of shards above it are tinted by rarity, so
+ * a legendary chest is readable across an arena before it is opened. The lid is
+ * returned as an animated part so the game can play a real opening motion.
+ */
+export function buildChest(rarityColor: number, rarityIndex: number): PropBuild & { lid: THREE.Object3D } {
+  const group = new THREE.Group();
+  const materials: THREE.Material[] = [];
+
+  const wood = new THREE.MeshStandardMaterial({ color: 0x5a4028, roughness: 0.85 });
+  const metal = new THREE.MeshStandardMaterial({
+    color: rarityColor,
+    emissive: new THREE.Color(rarityColor),
+    emissiveIntensity: 0.6 + rarityIndex * 0.5,
+    roughness: 0.35,
+    metalness: 0.5,
+  });
+  materials.push(wood, metal);
+
+  const base = new THREE.Mesh(cached('chest-base', () => new THREE.BoxGeometry(1.1, 0.62, 0.78)), wood);
+  base.position.y = 0.31;
+  base.castShadow = true;
+  base.receiveShadow = true;
+  group.add(base);
+
+  // The lid pivots on a hinge group so the opening animation reads correctly.
+  const hinge = new THREE.Group();
+  hinge.position.set(0, 0.62, -0.39);
+  const lid = new THREE.Mesh(
+    cached('chest-lid', () => {
+      const geo = new THREE.CylinderGeometry(0.39, 0.39, 1.1, 12, 1, false, 0, Math.PI);
+      geo.rotateZ(Math.PI / 2);
+      return geo;
+    }),
+    wood,
+  );
+  lid.position.set(0, 0, 0.39);
+  lid.castShadow = true;
+  hinge.add(lid);
+  group.add(hinge);
+
+  for (const y of [0.14, 0.5]) {
+    const band = new THREE.Mesh(cached('chest-band', () => new THREE.BoxGeometry(1.14, 0.08, 0.82)), metal);
+    band.position.y = y;
+    group.add(band);
+  }
+  const lock = new THREE.Mesh(cached('chest-lock', () => new THREE.BoxGeometry(0.2, 0.24, 0.12)), metal);
+  lock.position.set(0, 0.56, 0.42);
+  group.add(lock);
+
+  // Rarity crown: one floating shard per rarity step above common.
+  const shards: THREE.Object3D[] = [];
+  for (let i = 0; i < rarityIndex; i++) {
+    const a = (i / Math.max(1, rarityIndex)) * Math.PI * 2;
+    const shard = new THREE.Mesh(cached('chest-shard', () => new THREE.OctahedronGeometry(0.11, 0)), metal);
+    shard.position.set(Math.cos(a) * 0.44, 1.1 + Math.sin(a * 2) * 0.1, Math.sin(a) * 0.44);
+    group.add(shard);
+    shards.push(shard);
+  }
+
+  return { group, materials, animated: [hinge, ...shards], lid: hinge };
+}
+
+/**
+ * A world-transition portal: a standing ring of keeper stone with a lit core.
+ *
+ * The core is returned as an animated part so it can pulse while the world's
+ * objective is incomplete and open fully once the World Heart is restored.
+ */
+export function buildPortal(color: number): PropBuild {
+  const group = new THREE.Group();
+  const stone = new THREE.MeshStandardMaterial({ color: 0x6b6f78, roughness: 0.92 });
+  const glow = new THREE.MeshStandardMaterial({
+    color,
+    emissive: new THREE.Color(color),
+    emissiveIntensity: 2.6,
+    roughness: 0.2,
+    transparent: true,
+    opacity: 0.72,
+    side: THREE.DoubleSide,
+  });
+  const materials = [stone, glow];
+
+  const arch = new THREE.Mesh(cached('portal-arch', () => new THREE.TorusGeometry(2.1, 0.28, 10, 26)), stone);
+  arch.position.y = 2.4;
+  arch.castShadow = true;
+  group.add(arch);
+
+  for (const side of [-1, 1]) {
+    const leg = new THREE.Mesh(cached('portal-leg', () => new THREE.CylinderGeometry(0.3, 0.42, 2.5, 8)), stone);
+    leg.position.set(side * 2.0, 1.25, 0);
+    leg.castShadow = true;
+    group.add(leg);
+  }
+
+  const core = new THREE.Mesh(cached('portal-core', () => new THREE.CircleGeometry(1.86, 26)), glow);
+  core.position.y = 2.4;
+  group.add(core);
+
+  return { group, materials, animated: [core] };
 }
 
 /** A ritual mote: the peaceful-mode objective pickup. */

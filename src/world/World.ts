@@ -16,9 +16,11 @@ import {
 } from './coords';
 import {
   DENSITY_CLAMP, densityAt, generateFieldSteps, gradientAt, isSolidAt, materialAt,
-  shrineProtection, surfaceHeight, type DensityField,
+  shrineProtection, surfaceHeight, type DensityField, type TerrainShape,
 } from './density';
 import { Mat, materialDef } from './materials';
+import { ObstacleField } from './Obstacles';
+import type { WorldDef, WorldId } from './worlds';
 import { buildChunkMesh } from './surfaceNets';
 import { brushVolume, createJournal, pushOp, type EditJournal, type TerrainOp } from './terrainEdits';
 
@@ -67,6 +69,27 @@ export class World {
   seed = 0;
   spawn = { x: 0, y: 0, z: 0 };
   shrineY: number[] = [];
+
+  /**
+   * Collision volumes for everything that is not terrain: trees, boulders,
+   * ruins, chests, portals and temporary earth walls. The player, respawn
+   * resolver and debug overlay all read from here.
+   */
+  readonly obstacles = new ObstacleField();
+
+  /** The world definition currently generated. */
+  worldId: WorldId = 'wilds';
+  /** Height of this world's water or lava surface. */
+  fluidLevel = SEA_LEVEL;
+  /** True when the fluid at `fluidLevel` is lava rather than water. */
+  fluidIsHazard = false;
+  /** Terrain shape parameters this world was generated with. */
+  private shape: Partial<TerrainShape> | undefined;
+  /**
+   * Spheres that terrain deformation may never touch: portals, World Hearts and
+   * boss arena anchors.
+   */
+  private readonly protectedSpheres: { x: number; y: number; z: number; r: number }[] = [];
 
   /** Player terrain edits, replayed on load. */
   readonly journal: EditJournal = createJournal();
@@ -124,10 +147,25 @@ export class World {
 
   // ------------------------------------------------------------- creation
 
-  /** Generate the base field for a seed, yielding 0..1 progress. */
-  *generate(seed: number, cleansed: readonly boolean[]): Generator<number, void, void> {
+  /**
+   * Generate the base field for a seed, yielding 0..1 progress.
+   *
+   * The world definition supplies the terrain shape, materials and fluid level,
+   * so each world is genuinely differently built rather than recoloured.
+   */
+  *generate(seed: number, cleansed: readonly boolean[], world?: WorldDef): Generator<number, void, void> {
     this.seed = seed;
-    const it = generateFieldSteps(seed, cleansed);
+    this.obstacles.clear();
+    this.protectedSpheres.length = 0;
+    this.worldId = world?.id ?? 'wilds';
+    this.fluidLevel = world ? world.seaLevel : SEA_LEVEL;
+    this.fluidIsHazard = world ? world.seaHazard : false;
+    this.shape = world ? { ...world.terrain, fluidLevel: world.seaLevel } : undefined;
+
+    const it = generateFieldSteps(seed, cleansed, {
+      shape: this.shape,
+      materials: world?.materials,
+    });
     let step = it.next();
     while (!step.done) {
       yield step.value * 0.55;
@@ -139,6 +177,15 @@ export class World {
     this.heights = field.heights;
     this.shrineY = [];
     yield 0.56;
+  }
+
+  /** Mark a sphere as undeformable, e.g. a portal or a World Heart. */
+  protectSphere(x: number, y: number, z: number, r: number): void {
+    this.protectedSpheres.push({ x, y, z, r });
+  }
+
+  clearProtectedSpheres(): void {
+    this.protectedSpheres.length = 0;
   }
 
   /** Replay stored player edits onto the freshly generated field. */
@@ -209,10 +256,19 @@ export class World {
     return densityAt(this.density, x, y, z);
   }
 
-  /** Outward surface normal at a point (points away from the solid). */
-  normalAt(x: number, y: number, z: number, out: THREE.Vector3): THREE.Vector3 {
+  /**
+   * Outward surface normal at a point (points away from the solid).
+   *
+   * `out` is any object with x/y/z, not necessarily a `THREE.Vector3`: the
+   * collision core is engine-free and passes plain vectors, so the fields are
+   * assigned directly rather than through `Vector3.set`.
+   */
+  normalAt<T extends { x: number; y: number; z: number }>(x: number, y: number, z: number, out: T): T {
     gradientAt(this.density, x, y, z, _grad);
-    return out.set(-_grad.x, -_grad.y, -_grad.z);
+    out.x = -_grad.x;
+    out.y = -_grad.y;
+    out.z = -_grad.z;
+    return out;
   }
 
   materialAt(x: number, y: number, z: number): number {
@@ -225,13 +281,31 @@ export class World {
     return h < 0 ? 0 : h;
   }
 
-  /** True when the point is inside the protected shrine foundation. */
+  /**
+   * True when the point may not be deformed.
+   *
+   * Covers the sculpted shrine foundations and every explicitly protected
+   * sphere - portals, World Hearts and boss anchors - so combat can never
+   * delete an objective or seal the way out of a world.
+   */
   isProtected(x: number, y: number, z: number): boolean {
-    return shrineProtection(x, y, z, this.seed);
+    if (shrineProtection(x, y, z, this.seed, this.shape)) return true;
+    for (const s of this.protectedSpheres) {
+      const dx = x - s.x;
+      const dy = y - s.y;
+      const dz = z - s.z;
+      if (dx * dx + dy * dy + dz * dz < s.r * s.r) return true;
+    }
+    return false;
   }
 
   isUnderwater(y: number): boolean {
-    return y < SEA_LEVEL;
+    return y < this.fluidLevel;
+  }
+
+  /** True when this point is inside the world's damaging fluid (lava). */
+  inHazardFluid(y: number): boolean {
+    return this.fluidIsHazard && y < this.fluidLevel;
   }
 
   // ------------------------------------------------------------ raycasting

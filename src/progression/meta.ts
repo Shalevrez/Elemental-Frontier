@@ -27,18 +27,18 @@ export const CURRENCY_NAME = 'Echoes';
 
 export const UNLOCKS: readonly UnlockDef[] = Object.freeze([
   u({
-    id: 'world-depths', name: 'The Sunken Depths', kind: 'world', cost: 30,
-    description: 'Opens the flooded cavern world: crystals, narrow passages and ambushers.',
+    id: 'world-depths', name: 'Tidal Archipelago', kind: 'world', cost: 30,
+    description: 'Opens the broken sea of islands: deep water, drowned ruins and air pockets.',
   }),
   u({
-    id: 'world-peaks', name: 'The Frozen Peaks', kind: 'world', cost: 55,
+    id: 'world-peaks', name: 'Frozen Expanse', kind: 'world', cost: 55,
+    requires: ['world-ashen'],
+    description: 'Opens the high snowfields: blizzards, slick ice and breakable frozen lakes.',
+  }),
+  u({
+    id: 'world-ashen', name: 'Ember Caldera', kind: 'world', cost: 55,
     requires: ['world-depths'],
-    description: 'Opens the high snowfields: poor visibility, slick ground, flying predators.',
-  }),
-  u({
-    id: 'world-ashen', name: 'The Ashen Expanse', kind: 'world', cost: 85,
-    requires: ['world-peaks'],
-    description: 'Opens the volcanic waste: embers, smoke and armored things that do not burn.',
+    description: 'Opens the volcanic basin: lava rivers, heat vents and things that do not burn.',
   }),
   u({
     id: 'pool-legendary', name: 'Echoing Legends', kind: 'upgrade-pool', cost: 45,
