@@ -168,6 +168,19 @@ export class TerrainEffects {
     return Math.min(INCOMING.maxEnvironmentDps, dps);
   }
 
+  /**
+   * The largest radius a single attack may reshape in the current world.
+   *
+   * Declared per world so a lava basin's shelves and a snowfield's ice bridges
+   * survive a terrain build that would flatten the Verdant Ruins. Set on load;
+   * `deform` clamps against it as well as against the global ceiling.
+   */
+  private worldLimit = MAX_DEFORM_RADIUS;
+
+  setWorldLimit(radius: number): void {
+    this.worldLimit = Math.max(1, Math.min(MAX_DEFORM_RADIUS, radius));
+  }
+
   /** True when the ground here has been made slippery (ice). */
   slipperyAt(x: number, y: number, z: number): boolean {
     for (const zone of this.zones) {
@@ -249,7 +262,7 @@ export class TerrainEffects {
     maxRadius = MAX_DEFORM_RADIUS,
   ): DeformResult {
     if (this.world.isProtected(x, y, z)) return { applied: false, reason: 'protected' };
-    const r = Math.min(maxRadius, MAX_DEFORM_RADIUS, Math.max(0.5, radius));
+    const r = Math.min(maxRadius, MAX_DEFORM_RADIUS, this.worldLimit, Math.max(0.5, radius));
     const ok = this.world.addTemporary({ x, y, z, radius: r, strength, material: material as MaterialId }, seconds);
     if (!ok) return { applied: false, reason: 'protected' };
     this.deformCount++;

@@ -121,6 +121,8 @@ export class CombatDirector {
   /** Budget derived from the run depth, replacing the base cap when set. */
   private depthBudget = 0;
   private depthRanged = 0;
+  /** Extra weight the current world is allowed, on top of the depth budget. */
+  private worldBonus = 0;
 
   constructor(config: Partial<DirectorConfig> = {}) {
     this.config = { ...DEFAULT_DIRECTOR, ...config };
@@ -136,9 +138,23 @@ export class CombatDirector {
     this.depthRanged = rangedBudgetForDepth(depth);
   }
 
+  /**
+   * Extra simultaneous-attacker weight granted by the world.
+   *
+   * Only the later worlds and New Game Plus cycles get any, and the total is
+   * still held under the combat pass's hard ceiling of four - a first-person
+   * player cannot read more than that however deep the run goes.
+   */
+  setWorldBonus(bonus: number): void {
+    this.worldBonus = Math.max(0, bonus);
+  }
+
   /** Total attack weight that may be committed at once. */
   get maxTokens(): number {
-    return Math.max(this.config.maxTokens, this.depthBudget);
+    return Math.min(
+      TOKENS.lateBudget,
+      Math.max(this.config.maxTokens, this.depthBudget) + this.worldBonus,
+    );
   }
 
   get maxRanged(): number {

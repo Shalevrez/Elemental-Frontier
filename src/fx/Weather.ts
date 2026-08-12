@@ -94,6 +94,16 @@ export class Weather {
   private kind: WeatherKind = 'clear';
   private targetKind: WeatherKind = 'clear';
   private intensity = 0;
+
+  /**
+   * How hard the weather is currently blowing, 0..1.
+   *
+   * Read by the deep-cold hazard: exposure to a blizzard is what makes the
+   * Frozen Expanse cold rather than merely white.
+   */
+  get strength(): number {
+    return this.intensity;
+  }
   private targetIntensity = 0;
   private densityScale = 1;
   private current: WeatherProfile = { ...PROFILES.clear };

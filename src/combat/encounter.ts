@@ -126,8 +126,22 @@ export class EncounterDirector {
   /** Beat spent in the resolve phase before recovery begins. */
   private resolveTimer = 0;
 
+  /** Scale set by the world profile, applied on top of the depth budget. */
+  private budgetScale = 1;
+
   setDepth(depth: number): void {
     this.depth = Math.max(0, depth);
+  }
+
+  /**
+   * How much larger or smaller this world's encounters are.
+   *
+   * The teaching world runs below one, the last world above it. The result is
+   * still clamped by `encounterBudget`'s own ceiling and by the live-creature
+   * cap, so no world can flood the arena.
+   */
+  setBudgetScale(scale: number): void {
+    this.budgetScale = Math.max(0.5, Math.min(2, scale));
   }
 
   get status(): EncounterStatus {
@@ -336,7 +350,7 @@ export class EncounterDirector {
   }
 
   private openEncounter(): void {
-    const total = encounterBudget(this.depth);
+    const total = Math.min(ENCOUNTER.maxBudget, encounterBudget(this.depth) * this.budgetScale);
     this.budget = total;
     this.reinforcement = total * ENCOUNTER.reinforcementFraction;
     this.phase = 'buildup';

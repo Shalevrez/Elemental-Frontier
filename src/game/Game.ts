@@ -31,7 +31,7 @@ import {
 } from '../elements/affinity';
 import {
   DEFAULT_SETTINGS, applyQualityPreset, createSave, deleteSave, loadSave, loadSettings,
-  opsFromSave, writeSave, writeSettings,
+  opsFromSave, validateSave, writeSave, writeSettings,
   type QualityPreset, type SaveData, type Settings,
 } from '../save/saveData';
 import {
@@ -66,8 +66,9 @@ import {
 import { BuffTracker, combineModifiers } from '../progression/buffs';
 import { CHEST_BUFFS, chestRarityLabel, rollChestOutcome, type ChestOutcome } from '../progression/chests';
 import { StoryProgress, type StoryBeat } from './story';
+import { NG_PLUS, ngCycles } from '../world/progression';
 import {
-  WORLD_ORDER, nextWorld, worldDef, worldIndex, type WorldId,
+  WORLD_ORDER, isWorldId, nextWorld, worldDef, worldIndex, type WorldId,
 } from '../world/worlds';
 import {
   createRewardLuck, noteOffers, pityPush, previewOffer, type RewardLuck,
@@ -184,6 +185,10 @@ export class Game {
   private combatTimer = 0;
   /** Cooldown between lava contact ticks. */
   private lavaTick = 0;
+  /** Cooldown between deep-cold warnings, so the toast is not constant. */
+  private coldWarn = 0;
+  /** True while a world transition is in flight, so it cannot be started twice. */
+  private transitioning = false;
   /** Cooldown between underwater bubble bursts. */
   private underwaterTick = 0;
   /** Current Mana bar state, shown by the HUD. */
@@ -283,6 +288,7 @@ export class Game {
         this.telegraphs.add(x, y, z, radius, seconds, color),
       offscreenWarning: (fromX, fromZ) => this.showDamageDirection(fromX, fromZ, true),
       onNearMiss: () => this.onNearMiss(),
+      onBossPhase: (note, phase) => this.onBossPhase(note, phase),
       onEnemyKilled: (kind, elites) => this.onEnemyKilled(kind, elites),
       // Enemy *damage* runs on its own flatter curve; enemy health uses
       // `run.difficulty` through `setDifficulty`.
@@ -695,8 +701,16 @@ export class Game {
       encounters: save.encounters, worldTheme: save.worldTheme,
       runStats: save.runStats, affinity: save.affinity,
     });
+    // The world profile has to be in force *before* difficulty is resolved:
+    // it multiplies the run's own curve rather than replacing it.
+    this.enemies.setWorld(
+      this.worldId, this.run.world.signatureEnemy, save.newGamePlus,
+    );
     this.enemies.setRoster(this.run.world.enemies, this.run.unlocked);
     this.enemies.setDifficulty(this.run.difficulty, this.run.eliteChance, this.run.depth);
+    // Each world declares how much ground a single attack may reshape, so a
+    // lava basin's shelves and a snowfield's ice bridges survive terrain play.
+    this.effects.setWorldLimit(this.run.world.maxDeformRadius);
     this.decals.clear();
     this.telegraphs.clear();
     this.accumulatedPlaytime = save.playtime;
@@ -741,6 +755,9 @@ export class Game {
   }
 
   private enterPlay(): void {
+    // The destination built and is playable: the transition is complete, and a
+    // further portal press is allowed again.
+    this.transitioning = false;
     // Arriving in a world - a new run, a load, or a step through a portal -
     // always begins in exploration, never mid-encounter.
     this.enemies.encounter.reset();
@@ -1489,6 +1506,32 @@ export class Game {
       // Water abilities meeting lava crust it over and raise steam.
       if (this.activeElement === 'water' && this.abilities.casting && feet < this.world.fluidLevel + 3) {
         this.effects.quenchLava(pos.x, pos.z, this.world.fluidLevel, 3);
+      }
+    }
+
+    // ---- deep cold
+    //
+    // The Frozen Expanse declared a `deep-cold` hazard that nothing read, so
+    // its snowfields were cosmetic. Cold now bites when the player is exposed:
+    // out in the open, away from shelter, while the blizzard is blowing. It is
+    // a slow drain rather than a spike - the answer is to keep moving toward
+    // cover, not to fight the weather - and standing under an overhang or in a
+    // cavern stops it entirely.
+    if (def.hazard.kind === 'deep-cold') {
+      const sheltered = this.world.isSolid(pos.x, pos.y + PLAYER_HEIGHT + 2.5, pos.z);
+      const exposure = this.weather.strength * (sheltered ? 0 : 1);
+      if (exposure > 0.25) {
+        const dps = def.hazard.dotDamage * exposure * this.enemies.worldDifficulty.hazardScale;
+        this.player.applyDamage(dps * dt, null, 0, true);
+        this.player.takingDamageOverTime = true;
+        this.coldWarn -= dt;
+        if (this.coldWarn <= 0) {
+          this.coldWarn = 9;
+          this.ui.toast('The deep cold is finding you — get under cover', 'warn', 2.4);
+        }
+      } else {
+        // Shelter is the counterplay, and it is worth telling the player once.
+        this.coldWarn = Math.min(this.coldWarn, 3);
       }
     }
 
@@ -2499,10 +2542,21 @@ export class Game {
    */
   private travelToWorld(target: WorldId): void {
     if (!this.save) return;
+    // A transition is not re-entrant. Holding E on a portal, or a second input
+    // arriving while the world is being torn down, used to start the journey
+    // twice and leave the run layer half-written.
+    if (this.transitioning) return;
+    if (!isWorldId(target)) {
+      this.ui.toast('That gate leads nowhere - staying put', 'bad', 4);
+      return;
+    }
+    this.transitioning = true;
     const save = this.save;
 
-    // 1. save *before* leaving, so a failure here loses nothing.
+    // 1. save *before* leaving, so a failure here loses nothing. This snapshot
+    // is the recovery point if anything below fails.
     this.persist();
+    const rollback = JSON.stringify(save);
 
     if (!save.worldsCompleted.includes(this.worldId)) save.worldsCompleted.push(this.worldId);
     save.worldHearts[this.worldId] = true;
@@ -2528,13 +2582,57 @@ export class Game {
     this.portal = null;
 
     if (!writeSave(window.localStorage, save)) {
-      this.ui.toast('Could not write the save - browser storage refused', 'bad', 4);
+      // The destination was never committed, so put the save back exactly as
+      // it was and leave the player where they are, still able to play.
+      this.restoreSave(rollback);
+      this.transitioning = false;
+      this.ui.toast(
+        'Could not write the save - staying in this world. Your progress is intact.',
+        'bad', 5,
+      );
       return;
     }
 
     this.pendingIsNew = false;
     this.audio.play('shrine-cleanse');
-    this.beginLoad(save);
+    try {
+      this.beginLoad(save);
+    } catch (error) {
+      // Initialisation failed after the write. The previous valid save is
+      // still on disk under the rollback snapshot, so restore it rather than
+      // leaving the player stranded in a world that did not build.
+      // eslint-disable-next-line no-console
+      console.error('[Elemental Frontier] world transition failed', error);
+      this.restoreSave(rollback);
+      this.transitioning = false;
+      this.ui.toast(
+        'That world could not be opened - you are back at your last checkpoint.',
+        'bad', 6,
+      );
+      this.refreshTitle();
+      this.setState('title');
+    }
+  }
+
+  /**
+   * Put a saved snapshot back after a failed transition.
+   *
+   * Deliberately writes the *previous* payload rather than repairing the
+   * current one: a half-written destination is not something to salvage, and
+   * the snapshot is known to have loaded successfully once already.
+   */
+  private restoreSave(snapshot: string): void {
+    try {
+      const parsed: unknown = JSON.parse(snapshot);
+      const result = validateSave(parsed);
+      if (!result.ok || !result.data) return;
+      this.save = result.data;
+      this.run.worldTheme = result.data.worldTheme;
+      writeSave(window.localStorage, result.data);
+    } catch {
+      // Nothing further to do: the on-disk save was never overwritten in the
+      // failure paths that reach here.
+    }
   }
 
   /** Reaching the end of the campaign: unlock the post-game, keep the build. */
@@ -2567,14 +2665,21 @@ export class Game {
   private startNewGamePlus(): void {
     if (!this.save) return;
     const save = this.save;
+    // Everything that defines the player is deliberately untouched here: the
+    // affinity, the Convergence state, the build, every chest reward, the
+    // Ultimate unlock, the inventory, the currency and the story already seen.
+    // Only the worlds reset. The world mode is preserved too, so a Peaceful
+    // save stays peaceful through every cycle.
     save.newGamePlus += 1;
     save.worldsCompleted = [];
     save.worldHearts = {};
     save.postGame = true;
     this.worldsCompleted = [];
+    const cycles = ngCycles(save.newGamePlus);
     this.ui.toast(
-      `New Game Plus ${save.newGamePlus} — your build, affinity and Ultimate all carry over`,
-      'good', 5,
+      `New Game Plus ${save.newGamePlus} — your build, affinity and Ultimate all carry over.`
+      + ` The worlds field harder combinations${cycles >= NG_PLUS.maxCycles ? ' (at maximum)' : ''}.`,
+      'good', 6,
     );
     this.travelToWorld(WORLD_ORDER[0]!);
   }
@@ -2976,6 +3081,22 @@ export class Game {
       fromX, fromZ, this.player.position.x, this.player.position.z, this.player.yaw,
     );
     this.ui.showDamageArrow(bearing, warningOnly);
+  }
+
+  /**
+   * A guardian entered a new phase.
+   *
+   * Announced rather than silent: a phase change opens a real window on the
+   * creature, and the player needs to be told the fight has changed shape.
+   */
+  private onBossPhase(note: string, phase: number): void {
+    this.ui.toast(note, phase === 0 ? 'warn' : 'good', 3);
+    if (phase > 0) {
+      this.audio.play('shrine-cleanse');
+      if (!this.settings.reducedFlashes) {
+        this.ui.elementFlash(ELEMENTS[this.activeElement].color, 0.3);
+      }
+    }
   }
 
   /**

@@ -593,7 +593,7 @@ attack speed, cooldowns and elemental resistance rather than by eye:
 | Small | Crawler, Wisp, Thorn Spitter, Ember Burst | under 3 s |
 | Standard | Root-Bound Hunter, Slinger, Magma Beast | under 6.5 s |
 | Heavy | Brute, Stone Beast, Obsidian-Clad, Crystal-Clad | under 14 s |
-| Guardian | Shrine Guardian, the Sundering Maw | paced by phases |
+| Guardian | Shrine Guardian | paced by phases |
 
 Resistances are clamped to the range **0.55 – 1.8**. Fire really is the wrong
 answer to an Obsidian-Clad and Water really is the right answer to a Magma
@@ -752,6 +752,53 @@ build you made, and the final portal offers **New Game Plus inside the same save
 worlds and nothing else. The affinity is rerolled **only** when you deliberately create a new save.
 
 ---
+
+
+### How the four worlds differ mechanically
+
+They were always shaped differently - real islands, a real lava basin, a real
+snowfield. They now *fight* differently too. Each world declares how it wants to
+be fought, and the spawn director composes encounters to match rather than
+drawing from the roster at random:
+
+| World | Intent | Ranged share | Heavy share | Elites | Hazard |
+| --- | --- | --- | --- | --- | --- |
+| **Verdant Ruins** | Teaches: readable, separable roles | 30 % | 35 % | ×0.6 | none |
+| **Tidal Archipelago** | Movement and resources: ambush, support | 40 % | 40 % | ×0.9 | none |
+| **Ember Caldera** | Positional pressure: armour, fire, lava | 50 % | 55 % | ×1.15 | lava |
+| **Frozen Expanse** | Everything at once, half-seen | 45 % | 50 % | ×1.35 | deep cold |
+
+The **ranged share** is the important one: three archers is a different fight
+from three brawlers whatever their health says, so the cap on how much of an
+encounter's threat budget may shoot at you is the single largest difficulty
+control in the game. Enemy *health* does not change across the base campaign at
+all — the curve is entirely composition, elites, budget and one extra
+simultaneous attacker in the last world.
+
+### Hazards
+
+**Lava** (Ember Caldera) costs 7 health per half-second of contact and leaves
+you burning for four seconds afterwards. A brush across a corner is survivable;
+standing in it is not. A 2.5 m warning band marks the edge.
+
+**Deep cold** (Frozen Expanse) drains while you are out in the open with the
+blizzard blowing, and stops entirely under an overhang or inside a cavern. It is
+a slow bite — over fifteen seconds from full health at full exposure — because
+the answer is to move toward cover, not to out-heal the weather.
+
+Each world also caps how much ground a single attack may reshape, so terrain
+play cannot flatten a lava basin's shelves or an ice bridge.
+
+### New Game Plus
+
+A cycle keeps everything that defines you — affinity, Convergence state, build,
+chest rewards, Ultimate unlock, inventory, currency, story seen, world mode —
+and resets only the worlds. Difficulty rises through **combination**: more
+elites, a larger share of the budget allowed to shoot or to wear armour, one
+more simultaneous attacker at the top. Enemy health rises by at most 75 % across
+*all five* scaling cycles, and everything stops scaling at cycle five, so a
+later cycle is a harder game rather than an impossible one.
+
 
 ## Swimming and oxygen
 
@@ -969,6 +1016,7 @@ elemental-frontier/
     │   └── AudioEngine.ts      every sound, synthesised with the Web Audio API
     ├── world/
     │   ├── worlds.ts           the four world definitions (data)
+    │   ├── progression.ts      world difficulty profiles, guardians, NG+ (pure)
     │   ├── Obstacles.ts        collision volumes for everything that is not terrain
     │   └── deformation.ts      combat terrain deformation rules and ground zones
     ├── save/
@@ -1004,6 +1052,11 @@ npm test
   fallback cast, oxygen drain, recovery and drowning cadence, elemental terrain interactions, story
   sequencing, world distinctness and the redesigned monsters.
 - **Save** — version 4 → 5 migration keeping everything and defaulting the new layer safely.
+- **Worlds** — world distinctness in terrain, fluid, hazard and roster; the difficulty curve
+  climbing through composition rather than health; per-world ranged and heavy shares actually
+  holding over many composed encounters; guardian phases, cadence and telegraph readability;
+  New Game Plus caps; transition persistence and rollback; Peaceful Mode refusing every spawn in
+  every world at every cycle; and save defaults for missing world progress.
 - **Rewards** — cadence gates and the 2-5 minute target, rarity distribution over thousands of
   seeded rolls, unlucky-streak protection, every card priced against its rarity budget, every
   promised behaviour actually implemented, no vague card copy, tradeoff costs and safe minimums,

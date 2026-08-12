@@ -28,6 +28,11 @@ import { CombatDirector, DEFAULT_DIRECTOR } from './CombatDirector';
 import { bodyCapsule, sphereVsCapsule, type Capsule, type Vec3 } from './hitVolumes';
 import { AIM, ENCOUNTER, INCOMING, REACTION, SPAWN } from './combatConfig';
 import { EncounterDirector, type EncounterSignals, type EncounterStatus } from './encounter';
+import {
+  GUARDIAN_PROFILES, chooseKind, createComposition, notePlacement, phaseAt,
+  worldDifficulty, type CompositionState, type GuardianProfile, type WorldDifficulty,
+} from '../world/progression';
+import type { WorldId } from '../world/worlds';
 import { isStranded, validateSpawn, type SpawnWorldProbe } from './spawnRules';
 import { WORLD_CENTER, WORLD_SIZE } from '../world/coords';
 import { SPAWN_PLAZA_RADIUS } from '../world/density';
@@ -128,6 +133,8 @@ export interface EnemyContext {
   onNearMiss?(): void;
   /** A creature died; lets the run layer count kills and offer rewards. */
   onEnemyKilled(kind: EnemyKind, elites: readonly EliteId[]): void;
+  /** A guardian or boss entered a new phase. */
+  onBossPhase?(note: string, phase: number): void;
   /** Current run difficulty multiplier. */
   difficulty(): number;
 
@@ -196,6 +203,14 @@ export class Enemy {
   circleSign = 1;
   /** Reinforcement waves a summoner has left, so support is never endless. */
   summonsLeft = 3;
+  /** Phase profile for a guardian or boss. Null for ordinary creatures. */
+  bossProfile: GuardianProfile | null = null;
+  /** Index into `bossProfile.phases`. */
+  bossPhase = 0;
+  /** Seconds of the open, staggered window that opens a new phase. */
+  phaseRecovery = 0;
+  /** Set for one frame when a phase boundary is crossed. */
+  phaseChanged = false;
   /** Seconds spent chasing without getting meaningfully closer. */
   noProgressTimer = 0;
   /** Best distance to the player this creature has managed while chasing. */
@@ -227,7 +242,8 @@ export class Enemy {
   /** Unique id used by the combat director. */
   readonly uid: number;
   private damageScale = 1;
-  private speedScale = 1;
+  /** Movement multiplier from elites and, for a guardian, its world profile. */
+  speedScale = 1;
   /** Set when the creature is being removed peacefully rather than killed. */
   dissolving = false;
 
@@ -669,6 +685,13 @@ export class EnemyManager {
   private lastRefusal: string | null = null;
   /** Why the last candidate point was rejected. Debug overlay only. */
   private lastSpawnRejection: string | null = null;
+  /** The world being fought in, and the difficulty profile it implies. */
+  private worldId: WorldId = 'wilds';
+  private difficulty: WorldDifficulty = worldDifficulty('wilds', 0);
+  /** The world's signature creature, favoured when composition allows. */
+  private signature: EnemyKind = 'crawler';
+  /** Role mix placed in the current encounter. */
+  private composition: CompositionState = createComposition();
 
   constructor(private readonly ctx: EnemyContext) {
     this.group.name = 'enemies';
@@ -688,10 +711,35 @@ export class EnemyManager {
   }
 
   setDifficulty(healthScale: number, eliteChance: number, depth: number): void {
-    this.healthScale = healthScale;
-    this.eliteChance = eliteChance;
+    // The world profile is a multiplier on the run's own curve rather than a
+    // replacement for it: depth still drives the shape, the world decides how
+    // steeply and with what composition.
+    this.healthScale = healthScale * this.difficulty.healthScale;
+    this.eliteChance = eliteChance * this.difficulty.eliteScale;
     this.director.setDepth(depth);
+    this.director.setWorldBonus(this.difficulty.tokenBonus);
     this.encounter.setDepth(depth);
+    this.encounter.setBudgetScale(this.difficulty.budgetScale);
+  }
+
+  /**
+   * Tell the manager which world it is fighting in.
+   *
+   * This is what turns four rosters into four different fights: the profile
+   * decides how much of an encounter may shoot at the player, how much of it
+   * may be armoured, and how often the world's own creature turns up.
+   */
+  setWorld(world: WorldId, signature: EnemyKind, newGamePlus: number): void {
+    this.worldId = world;
+    this.signature = signature;
+    this.difficulty = worldDifficulty(world, newGamePlus);
+    this.director.setWorldBonus(this.difficulty.tokenBonus);
+    this.encounter.setBudgetScale(this.difficulty.budgetScale);
+  }
+
+  /** The resolved world difficulty, for the debug overlay and the tests. */
+  get worldDifficulty(): WorldDifficulty {
+    return this.difficulty;
   }
 
   /** Pacing state, for the HUD-free debug overlay and the tests. */
@@ -786,12 +834,28 @@ export class EnemyManager {
     return this.spawn(kind, position, type.accent, healthScale, elites);
   }
 
+  /**
+   * Wake the guardian that holds this shrine.
+   *
+   * Every world used the same guardian with the same three attacks at the same
+   * cadence. It is still the same sculpted body - this is a tuning pass, not a
+   * new roster - but each world's guardian now has its own durability, speed,
+   * telegraph length and escalation, so the Rootwarden teaches and the
+   * Rimebound closes the campaign.
+   */
   spawnGuardian(shrineIndex: number, position: THREE.Vector3): Enemy | null {
     if (this.peaceful) return null;
     const site = SHRINE_SITES[shrineIndex]!;
-    const guardian = this.spawn('guardian', position, ELEMENTS[site.element].color, 1);
+    const profile = GUARDIAN_PROFILES[this.worldId];
+    const guardian = this.spawn(
+      'guardian', position, ELEMENTS[site.element].color,
+      profile.healthScale * this.difficulty.healthScale,
+    );
+    guardian.bossProfile = profile;
+    guardian.speedScale *= profile.speedScale;
     guardian.shrineIndex = shrineIndex;
     guardian.showBar(6);
+    this.ctx.onBossPhase?.(profile.phases[0]!.note, 0);
     return guardian;
   }
 
@@ -932,7 +996,52 @@ export class EnemyManager {
     return true;
   }
 
+  /**
+   * Advance a major fight through its phases.
+   *
+   * A guardian used to be the same three attacks at the same cadence until its
+   * bar emptied. Crossing a phase boundary now staggers it briefly - a real
+   * opening the player can commit to - and changes how fast it acts afterwards.
+   * Telegraphs are scaled per phase too, and never shortened below the point
+   * where the wind-up can still be read.
+   */
+  private updateBossPhase(e: Enemy, dt: number): void {
+    const profile = e.bossProfile;
+    e.phaseChanged = false;
+    if (!profile || !e.alive) return;
+    if (e.phaseRecovery > 0) {
+      e.phaseRecovery = Math.max(0, e.phaseRecovery - dt);
+      // While recovering the guardian is open: staggered, and not winding up.
+      e.staggerTimer = Math.max(e.staggerTimer, e.phaseRecovery);
+    }
+    const fraction = e.maxHealth > 0 ? e.health / e.maxHealth : 1;
+    const next = phaseAt(profile, fraction);
+    if (next <= e.bossPhase) return;
+
+    e.bossPhase = next;
+    e.phaseChanged = true;
+    const phase = profile.phases[next]!;
+    e.phaseRecovery = phase.recovery;
+    // Cancel whatever it was winding up: a phase change is a clean break.
+    if (e.pendingAttack >= 0) {
+      this.director.release(e.attackToken);
+      e.attackToken = -1;
+      e.pendingAttack = -1;
+      e.telegraphTimer = 0;
+    }
+    e.attackTimer = Math.max(e.attackTimer, phase.recovery);
+    e.showBar(6);
+    this.ctx.onBossPhase?.(phase.note, next);
+    this.ctx.particles.spark({
+      count: 60, x: e.pos.x, y: e.pos.y + e.def.height * 0.6, z: e.pos.z,
+      spread: e.def.radius * 1.2, jitter: 7, color: e.type.accent, color2: 0xffffff,
+      size: 0.5, life: 1, gravity: 1.4, drag: 0.9,
+    });
+    this.ctx.audio.play('shrine-cleanse');
+  }
+
   private updateStatus(e: Enemy, dt: number): void {
+    if (e.bossProfile) this.updateBossPhase(e, dt);
     if (e.slowTimer > 0) {
       e.slowTimer -= dt;
       if (e.slowTimer <= 0) e.slowFactor = 1;
@@ -996,10 +1105,16 @@ export class EnemyManager {
     const fwd = this.ctx.getPlayerForward();
     const inFront = this.director.isInFront(_tmpA.x, _tmpA.z, fwd.x, fwd.z);
 
+    // A phased fight scales its own timing: the later phases act sooner, and
+    // the telegraph multiplier keeps every wind-up readable while they do.
+    const phase = e.bossProfile?.phases[e.bossPhase];
+    const telegraphScale = (e.bossProfile?.telegraph ?? 1) * (phase?.telegraph ?? 1);
+
     const category = attackCategoryOf(attack, e.type.role);
+    const baseTelegraph = attack.telegraph * telegraphScale;
     const grant = category === null
-      ? this.director.requestUncontested(attack.telegraph, inFront)
-      : this.director.request(e.uid, attack.telegraph, inFront, category);
+      ? this.director.requestUncontested(baseTelegraph, inFront)
+      : this.director.request(e.uid, baseTelegraph, inFront, category);
     if (!grant.granted) {
       // Denied attackers do not stand and stare: they go and make themselves a
       // problem somewhere else while they wait for an opening.
@@ -1014,7 +1129,7 @@ export class EnemyManager {
     e.attackToken = grant.token;
     e.state = 'telegraph';
     e.stateTime = 0;
-    e.attackTimer = attack.cooldown + grant.telegraph;
+    e.attackTimer = attack.cooldown * (phase?.cadence ?? 1) + grant.telegraph;
 
     // The audio cue always plays; it is the fallback warning when off-screen.
     this.ctx.audio.play('enemy-attack', 40);
@@ -1408,6 +1523,7 @@ export class EnemyManager {
     const signals = this.signals(playerPos, playerAlive, wanderers, peaceful);
     const verdict = this.encounter.requestSpawn(signals);
     this.lastRefusal = verdict.allowed ? null : (verdict.reason ?? null);
+    if (verdict.opens) this.composition = createComposition();
     if (!verdict.allowed || verdict.threat <= 0) return;
 
     const fromReinforcement = this.encounter.status.budgetLeft <= 0;
@@ -1465,13 +1581,14 @@ export class EnemyManager {
    */
   private placeGroup(playerPos: THREE.Vector3, threat: number): number {
     const roster = this.roster.length > 0 ? this.roster : (['crawler', 'wisp'] as EnemyKind[]);
-    // Prefer a creature the budget can actually afford; fall back to the
-    // cheapest in the roster rather than overspending on a single heavy.
-    const affordable = roster.filter((k) => ENEMY_TYPES[k].threat <= threat + 0.01);
-    const pool = affordable.length > 0 ? affordable : [
-      roster.reduce((a, b) => (ENEMY_TYPES[a].threat <= ENEMY_TYPES[b].threat ? a : b)),
-    ];
-    const kind = pool[Math.floor(Math.random() * pool.length)]!;
+    // Composition, not a coin flip. The world profile caps how much of an
+    // encounter may shoot from range or stand behind armour, and favours the
+    // creature that makes this world's fights recognisable.
+    const kind = chooseKind(
+      roster, this.composition, this.encounter.status.budgetLeft + threat,
+      threat, this.difficulty, this.signature,
+    );
+    if (kind === null) return 0;
     const type = ENEMY_TYPES[kind];
 
     const point = this.findSpawnPoint(playerPos, type);
@@ -1493,6 +1610,7 @@ export class EnemyManager {
       _tmpA.y = this.ctx.world.groundHeight(_tmpA.x, _tmpA.z) + 0.3;
       if (type.locomotion === 'hover') _tmpA.y += 2.6;
       this.spawnMaybeElite(kind, _tmpA, this.eliteChance, this.healthScale);
+      notePlacement(this.composition, kind);
       spent += type.threat;
     }
     return spent;
