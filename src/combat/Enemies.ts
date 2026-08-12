@@ -119,6 +119,13 @@ export interface EnemyContext {
   telegraph(x: number, y: number, z: number, radius: number, seconds: number, color: number): void;
   /** Warn about an attack starting outside the player's view. */
   offscreenWarning(fromX: number, fromZ: number): void;
+  /**
+   * A telegraphed attack resolved and just missed the player.
+   *
+   * "Just" means inside half again the radius that would have connected, so
+   * this fires for a real dodge and not for standing across the arena.
+   */
+  onNearMiss?(): void;
   /** A creature died; lets the run layer count kills and offer rewards. */
   onEnemyKilled(kind: EnemyKind, elites: readonly EliteId[]): void;
   /** Current run difficulty multiplier. */
@@ -1072,6 +1079,8 @@ export class EnemyManager {
         if (dist < attack.markerRadius) {
           this.ctx.damagePlayer(e.attackDamage(attack.damage, difficulty, maxHealth), e.pos, attack.knockback);
           this.director.notifyLanded();
+        } else if (dist < attack.markerRadius * 1.5) {
+          this.ctx.onNearMiss?.();
         }
         if (e.kind === 'sapper') this.kill(e);
         break;
@@ -1080,6 +1089,8 @@ export class EnemyManager {
         if (dist < attack.range) {
           this.ctx.damagePlayer(e.attackDamage(attack.damage, difficulty, maxHealth), e.pos, attack.knockback);
           this.director.notifyLanded();
+        } else if (dist < attack.range * 1.5) {
+          this.ctx.onNearMiss?.();
         }
         this.ctx.particles.spark({
           count: 30, x: e.pos.x + _dir.x * 2, y: e.pos.y + e.type.height * 0.5, z: e.pos.z + _dir.z * 2,
@@ -1092,6 +1103,8 @@ export class EnemyManager {
         if (dist < attack.range + 0.6) {
           this.ctx.damagePlayer(e.attackDamage(attack.damage, difficulty, maxHealth), e.pos, attack.knockback);
           this.director.notifyLanded();
+        } else if (dist < (attack.range + 0.6) * 1.5) {
+          this.ctx.onNearMiss?.();
         }
         this.ctx.particles.spark({
           count: 12, x: e.pos.x + _dir.x, y: e.pos.y + 0.7, z: e.pos.z + _dir.z, spread: 0.5,

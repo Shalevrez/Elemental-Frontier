@@ -86,6 +86,16 @@ export class Player {
   fallStartY = 0;
   falling = false;
   airDashAvailable = true;
+  /** Extra mid-air dashes from `extra-dash`, refilled on landing. */
+  bonusAirDashes = 0;
+  private bonusDashesLeft = 0;
+  /** Fraction of any healing that is also granted as a shield (`heal-shield`). */
+  healShieldFraction = 0;
+  /** Armour from standing on firm ground (`ground-armor`). */
+  groundArmor = 0;
+  /** Armour that builds while standing still and is spent by moving (`unmoved`). */
+  unmovedArmor = 0;
+  private unmovedStacks = 0;
   dashGrace = 0;
   alive = true;
 
@@ -173,8 +183,26 @@ export class Player {
     this.falling = false;
     this.fallStartY = y;
     this.airDashAvailable = true;
+    this.bonusDashesLeft = this.bonusAirDashes;
     this.oxygen.oxygen = this.oxygen.maxOxygen;
     this.oxygen.drownTimer = 0;
+  }
+
+  /** True when another mid-air dash is available. */
+  canAirDash(): boolean {
+    return this.onGround || this.airDashAvailable || this.bonusDashesLeft > 0;
+  }
+
+  /**
+   * Spend one mid-air dash.
+   *
+   * `extra-dash` charges are spent first, so the base dash is still there when
+   * the extras run out - which is what "an extra air dash" has to mean.
+   */
+  consumeAirDash(): void {
+    if (this.onGround) return;
+    if (this.bonusDashesLeft > 0) this.bonusDashesLeft -= 1;
+    else this.airDashAvailable = false;
   }
 
   /** Grant the post-respawn grace period. */
@@ -379,6 +407,7 @@ export class Player {
     const drop = this.fallStartY - this.position.y;
     const impact = Math.abs(this.velocity.y);
     this.airDashAvailable = true;
+    this.bonusDashesLeft = this.bonusAirDashes;
     this.onLand?.(impact);
 
     if (this.inWater || this.dashGrace > 0) return;
@@ -465,7 +494,7 @@ export class Player {
     let dmg = amount;
     if (this.activeElement === 'earth' && this.standingOnFirmGround()) dmg *= 0.82;
     // Build armor and temporary armor both cut incoming damage.
-    const armor = Math.min(0.8, this.buildArmor + this.tempArmor);
+    const armor = Math.min(0.8, this.buildArmor + this.tempArmor + this.stanceArmor());
     dmg *= 1 - armor;
     // A shield soaks damage before health does.
     if (this.shield > 0) {
@@ -531,7 +560,38 @@ export class Player {
   }
 
   heal(amount: number): void {
+    if (amount <= 0) return;
     this.health = Math.min(this.maxHealth, this.health + amount);
+    // `heal-shield` (Tideguard): every point of healing also lays down a
+    // fraction of itself as absorb, so a healing build is also a durable one.
+    if (this.healShieldFraction > 0) this.grantShield(amount * this.healShieldFraction);
+  }
+
+  /**
+   * Armour the build earns from how the player is standing.
+   *
+   * `ground-armor` pays for holding firm ground; `unmoved` pays for holding
+   * still and is spent the moment the player moves. Both are folded into the
+   * same reduction the HUD already shows, and the total is still capped by
+   * `applyDamage`.
+   */
+  stanceArmor(): number {
+    let armor = 0;
+    if (this.groundArmor > 0 && this.standingOnFirmGround()) armor += this.groundArmor;
+    if (this.unmovedArmor > 0) armor += this.unmovedArmor * this.unmovedStacks;
+    return armor;
+  }
+
+  /** Advance the stand-still armour. Called once per frame from the game loop. */
+  tickStance(dt: number, moving: boolean): void {
+    if (this.unmovedArmor <= 0) { this.unmovedStacks = 0; return; }
+    if (moving) this.unmovedStacks = 0;
+    else this.unmovedStacks = Math.min(3, this.unmovedStacks + dt * 0.9);
+  }
+
+  /** How much stand-still armour has been built, 0..3 stacks. */
+  get unmovedProgress(): number {
+    return this.unmovedStacks / 3;
   }
 
   /** Temporary flat damage reduction, e.g. from Stonehide. */

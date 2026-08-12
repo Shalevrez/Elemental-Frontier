@@ -164,23 +164,30 @@ export class Props {
       place('cache', WORLD_CENTER + Math.cos(a) * r, WORLD_CENTER + Math.sin(a) * r, id++);
     }
 
-    // --- reward chests: a ring near the plaza plus a spread across the world,
-    // so a player always finds several without having to hunt for them.
-    for (let i = 0; i < 6; i++) {
-      const a = (i / 6) * Math.PI * 2 + hash2(i, 71, seed) * 0.6;
+    // --- reward chests.
+    //
+    // Twenty-eight per world turned exploration into a shopping run and
+    // exhausted the permanent chest pool inside the first world, after which
+    // every later chest paid out a blessing instead. Sixteen is still enough
+    // that a player who explores is rewarded for it, and few enough that
+    // finding one is an event.
+    //
+    // They sit where a discovery would be: a short ring around the plaza a new
+    // player will stumble into, one beside each shrine, and a scattered set
+    // out in the country that has to be looked for.
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2 + hash2(i, 71, seed) * 0.6;
       const r = 26 + hash2(i, 73, seed) * 24;
       place('chest', WORLD_CENTER + Math.cos(a) * r, WORLD_CENTER + Math.sin(a) * r, id++);
     }
     for (const site of SHRINE_SITES) {
-      for (let i = 0; i < 2; i++) {
-        const a = hash2(site.index, i + 90, seed) * Math.PI * 2;
-        const r = 16 + hash2(site.index, i + 95, seed) * 14;
-        place('chest', site.x + Math.cos(a) * r, site.z + Math.sin(a) * r, id++);
-      }
+      const a = hash2(site.index, 90, seed) * Math.PI * 2;
+      const r = 16 + hash2(site.index, 95, seed) * 14;
+      place('chest', site.x + Math.cos(a) * r, site.z + Math.sin(a) * r, id++);
     }
-    for (let i = 0; i < 14; i++) {
+    for (let i = 0; i < 8; i++) {
       const a = hash2(i, 131, seed) * Math.PI * 2;
-      const r = 30 + hash2(i, 137, seed) * 82;
+      const r = 40 + hash2(i, 137, seed) * 72;
       place('chest', WORLD_CENTER + Math.cos(a) * r, WORLD_CENTER + Math.sin(a) * r, id++);
     }
 

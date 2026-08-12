@@ -8,7 +8,7 @@
 
 import type { ElementId } from '../elements/affinity';
 import {
-  BASE_MODIFIERS, UPGRADES, accumulateStats, clampStats, upgradeById,
+  BASE_MODIFIERS, UPGRADES, accumulateStats, cappedStats, clampStats, upgradeById,
   type StatModifiers, type UpgradeDef, type UpgradeHook,
 } from './upgrades';
 
@@ -21,6 +21,8 @@ export class BuildState {
   /** upgrade id -> stacks owned. */
   private owned = new Map<string, number>();
   private stats: StatModifiers = { ...BASE_MODIFIERS };
+  /** The same totals before clamping, so a ceiling in force can be shown. */
+  private raw: StatModifiers = { ...BASE_MODIFIERS };
   /** behaviour tag -> total stacks granting it. */
   private grants = new Map<string, number>();
   /** hook -> upgrade defs that declare it. */
@@ -78,6 +80,21 @@ export class BuildState {
 
   get modifiers(): Readonly<StatModifiers> {
     return this.stats;
+  }
+
+  /** Totals before clamping. Only the pause screen needs these. */
+  get rawModifiers(): Readonly<StatModifiers> {
+    return this.raw;
+  }
+
+  /**
+   * Multipliers currently pinned at their ceiling.
+   *
+   * A build that has stacked past a cap is told so, rather than quietly
+   * receiving less than its cards promised.
+   */
+  caps(): { label: string; value: string }[] {
+    return cappedStats(this.raw);
   }
 
   get size(): number {
@@ -200,6 +217,7 @@ export class BuildState {
       }
     }
 
+    this.raw = { ...stats };
     this.stats = clampStats(stats);
   }
 }

@@ -158,13 +158,6 @@ const ABILITY_NODE_IDS = [
   'ability-primary', 'ability-secondary', 'ability-technique', 'ability-ultimate',
 ];
 
-/** How a reward's lifetime is described on its card. */
-const PERMANENCE_LABEL: Record<'save' | 'world' | 'temporary', string> = {
-  save: 'Permanent for this save',
-  world: 'Lasts for this world',
-  temporary: 'Temporary',
-};
-
 export class UI {
   private hitConfirmTimer = 0;
   private screens: Record<Exclude<ScreenName, 'none'>, HTMLElement>;
@@ -883,7 +876,26 @@ export class UI {
       const tags: string[] = [];
       tags.push(`<span class="reward-tag stack">${offer.owned}/${def.maxStacks} stacks</span>`);
       if (offer.synergyHit) tags.push(`<span class="reward-tag syn">synergy · ${offer.synergyHit}</span>`);
+      // Every synergy label the card carries, not only the one already matched,
+      // so the player can see what it would build toward.
+      for (const tag of offer.preview.synergy) {
+        if (tag === offer.synergyHit) continue;
+        tags.push(`<span class="reward-tag syn-soft">synergy · ${tag}</span>`);
+      }
       for (const tag of def.tags) tags.push(`<span class="reward-tag">${tag}</span>`);
+
+      // Requirements and exclusions are part of the decision, so they are on
+      // the card rather than discovered afterwards.
+      const conditions: string[] = [];
+      if (offer.preview.requires.length > 0) {
+        conditions.push(`<li class="req">Requires ${offer.preview.requires.join(', ')}</li>`);
+      }
+      if (offer.preview.incompatible.length > 0) {
+        conditions.push(`<li class="excl">Cannot be combined with ${offer.preview.incompatible.join(', ')}</li>`);
+      }
+      if (offer.owned + 1 >= def.maxStacks) {
+        conditions.push(`<li class="req">Taking this reaches the maximum of ${def.maxStacks}</li>`);
+      }
 
       card.innerHTML =
         `<span class="reward-head">`
@@ -895,8 +907,9 @@ export class UI {
         + `<ul class="reward-effects">${benefits}${penalties}</ul>`
         + (def.warning && offer.preview.penalties.length > 0
           ? `<span class="reward-warning"><i>⚠</i>${def.warning}</span>` : '')
+        + (conditions.length > 0 ? `<ul class="reward-conditions">${conditions.join('')}</ul>` : '')
         + `<span class="reward-element">${element ? `${element.name} compatible` : 'Any element'}`
-        + ` · ${PERMANENCE_LABEL[offer.preview.permanence]}</span>`
+        + ` · ${offer.preview.duration}</span>`
         + (deltas ? `<div class="reward-preview"><span>Stat preview</span>${deltas}</div>` : '')
         + `<span class="reward-meta">${tags.join('')}</span>`;
 
@@ -977,6 +990,7 @@ export class UI {
     entries: { name: string; rarity: string; stacks: number; color: number }[],
     paths: { tag: string; weight: number }[],
     synergies: SynergyMatch[],
+    caps: { label: string; value: string }[] = [],
   ): void {
     const node = el<HTMLElement>('pause-build');
     if (entries.length === 0) {
@@ -992,7 +1006,12 @@ export class UI {
     const synLine = synergies.length > 0
       ? `<div class="bp-paths">Synergies: ${synergies.map((x) => `<b>${x.tag}</b>`).join(' · ')}</div>`
       : '';
-    node.innerHTML = rows + pathLine + synLine;
+    // A ceiling the player has stacked past is stated outright, so the build
+    // screen never shows more power than the game is actually applying.
+    const capLine = caps.length > 0
+      ? `<div class="bp-caps">At maximum: ${caps.map((c) => `<b>${c.label}</b> ${c.value}`).join(' · ')}</div>`
+      : '';
+    node.innerHTML = rows + pathLine + synLine + capLine;
   }
 
   damageFlash(strength: number): void {

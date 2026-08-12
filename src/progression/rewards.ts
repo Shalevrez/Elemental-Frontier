@@ -8,6 +8,7 @@ import type { ElementId } from '../elements/affinity';
 import type { BuildState } from './BuildState';
 import {
   BASE_MODIFIERS, RARITY_WEIGHTS, REWARD_UPGRADES, accumulateStats, clampStats, describeUpgrade,
+  upgradeById,
   type EffectLine, type Rarity, type StatModifiers, type UpgradeDef,
 } from './upgrades';
 
@@ -20,6 +21,8 @@ export interface RewardContext {
   depth: number;
   /** Extra rarity push for elite/boss rewards. */
   luck?: number;
+  /** Additional push from an unlucky streak. See `pityPush`. */
+  pity?: number;
 }
 
 export interface RewardOffer {
@@ -30,10 +33,51 @@ export interface RewardOffer {
   synergyHit: string | null;
 }
 
+/**
+ * Unlucky-streak protection.
+ *
+ * A pure weighted roll can hand a player five screens of Commons in a row,
+ * which reads as the game not paying attention. Every screen that produces
+ * nothing of Rare or better adds a small push toward the higher rarities; the
+ * push is capped and it resets the moment a Rare turns up, so this softens bad
+ * luck without ever becoming a guarantee.
+ */
+export const PITY = Object.freeze({
+  /** Screens without a Rare-or-better before the push starts. */
+  grace: 2,
+  /** Rarity push added per screen beyond the grace period. */
+  perScreen: 0.9,
+  /** Ceiling on the accumulated push. */
+  max: 3.6,
+});
+
+export interface RewardLuck {
+  /** Selection screens since one contained a Rare or better. */
+  dryScreens: number;
+}
+
+export function createRewardLuck(): RewardLuck {
+  return { dryScreens: 0 };
+}
+
+/** The rarity push the current dry streak has earned. */
+export function pityPush(luck: RewardLuck): number {
+  const over = Math.max(0, luck.dryScreens - PITY.grace);
+  return Math.min(PITY.max, over * PITY.perScreen);
+}
+
+/** Record what a screen actually offered, so the streak stays honest. */
+export function noteOffers(luck: RewardLuck, offers: readonly RewardOffer[]): void {
+  const good = offers.some(
+    (o) => o.def.rarity === 'rare' || o.def.rarity === 'epic' || o.def.rarity === 'legendary',
+  );
+  luck.dryScreens = good ? 0 : luck.dryScreens + 1;
+}
+
 /** How strongly higher rarities are favoured as a run progresses. */
 export function rarityWeightAt(rarity: Rarity, depth: number, luck = 0): number {
   const base = RARITY_WEIGHTS[rarity];
-  const push = Math.max(0, depth) * 0.16 + luck;
+  const push = Math.max(0, depth) * 0.16 + Math.max(0, luck);
   switch (rarity) {
     case 'common': return Math.max(12, base * (1 - push * 0.32));
     case 'uncommon': return base * (1 + push * 0.05);
@@ -77,7 +121,7 @@ export function rollRewards(
     let total = 0;
     const weights: number[] = [];
     for (const def of candidates) {
-      let w = rarityWeightAt(def.rarity, ctx.depth, ctx.luck ?? 0);
+      let w = rarityWeightAt(def.rarity, ctx.depth, (ctx.luck ?? 0) + (ctx.pity ?? 0));
       // Gently favour upgrades that build on what the player already has.
       if (def.synergy?.some((t) => ownedSynergy.has(t))) w *= 1.5;
       if (def.element !== 'any') w *= 1.25;
@@ -137,8 +181,30 @@ export interface OfferPreview {
   deltas: StatDelta[];
   /** How long the effect lasts. */
   permanence: 'save' | 'world' | 'temporary';
+  /** Plain-language duration, e.g. "Permanent" or "60 seconds". */
+  duration: string;
   /** Explicit warning text for a card with a major downside. */
   warning: string | null;
+  /** Stacks owned before taking this, and the ceiling. */
+  stacks: number;
+  maxStacks: number;
+  /** Upgrades that had to be owned first, by name. */
+  requires: string[];
+  /** Upgrades this can never be combined with, by name. */
+  incompatible: string[];
+  /** Synergy labels this card carries. */
+  synergy: string[];
+  /** True when this card carries a deliberate downside. */
+  tradeoff: boolean;
+}
+
+/** Plain-language duration for a card. */
+export function permanenceLabel(permanence: 'save' | 'world' | 'temporary', seconds = 0): string {
+  if (permanence === 'temporary') {
+    return seconds > 0 ? `Lasts ${Math.round(seconds)} seconds` : 'Temporary';
+  }
+  if (permanence === 'world') return 'Until you leave this world';
+  return 'Permanent — kept across worlds and deaths';
 }
 
 /** Stats worth showing in the confirmation preview, with how to format them. */
@@ -189,11 +255,24 @@ export function previewOffer(build: BuildState, def: UpgradeDef): OfferPreview {
   }
 
   const { benefits, penalties } = describeUpgrade(def, 1);
+  const permanence = def.permanence ?? 'save';
   return {
     benefits,
     penalties,
     deltas,
-    permanence: def.permanence ?? 'save',
+    permanence,
+    duration: permanenceLabel(permanence),
     warning: def.warning ?? (penalties.length > 0 ? 'This reward has a real cost.' : null),
+    stacks: build.stacksOf(def.id),
+    maxStacks: def.maxStacks,
+    requires: (def.requires ?? []).map(nameOf),
+    incompatible: (def.incompatible ?? []).map(nameOf),
+    synergy: [...(def.synergy ?? [])],
+    tradeoff: def.tradeoff === true,
   };
+}
+
+/** Readable name for an upgrade id, falling back to the id itself. */
+function nameOf(id: string): string {
+  return upgradeById(id)?.name ?? id;
 }

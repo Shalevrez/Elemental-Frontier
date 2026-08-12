@@ -110,12 +110,18 @@ export class RunState {
   // ------------------------------------------------------------ rewards
 
   /** Roll a fresh set of offers. `luck` biases toward higher rarity. */
-  offerRewards(random: () => number = Math.random, luck = 0, count = 3): RewardOffer[] {
+  offerRewards(
+    random: () => number = Math.random,
+    luck = 0,
+    count = 3,
+    pity = 0,
+  ): RewardOffer[] {
     const ctx: RewardContext = {
       elements: this.elements,
       unlocked: this.unlocked,
       depth: this.depth,
       luck,
+      pity,
     };
     let offers = rollRewards(this.build, ctx, random, count);
     // Respect the Convergence element cap by filtering and re-rolling once.

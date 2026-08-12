@@ -41,7 +41,7 @@ import {
 import { Mat, materialDef, type MaterialId } from '../world/materials';
 import { SEA_LEVEL, WORLD_CENTER, WORLD_SIZE, inWorld } from '../world/coords';
 import { serialiseOps, clampBrush, type TerrainOp } from '../world/terrainEdits';
-import { randomSeed } from '../core/rng';
+import { mulberry32, randomSeed } from '../core/rng';
 import { Decals } from '../fx/Decals';
 import { buildPortal } from '../render/models';
 import { Weather, weatherAt } from '../fx/Weather';
@@ -69,7 +69,13 @@ import { StoryProgress, type StoryBeat } from './story';
 import {
   WORLD_ORDER, nextWorld, worldDef, worldIndex, type WorldId,
 } from '../world/worlds';
-import { previewOffer } from '../progression/rewards';
+import {
+  createRewardLuck, noteOffers, pityPush, previewOffer, type RewardLuck,
+} from '../progression/rewards';
+import {
+  consumeOffer, createCadenceState, offerLuck, recordAccomplishment, shouldOffer,
+  tickCadence, type Accomplishment, type CadenceState,
+} from '../progression/cadence';
 import { abilityCombat } from '../combat/combatConfig';
 import type { EliteId, EnemyKind } from '../combat/enemyTypes';
 import { ENEMY_TYPES } from '../combat/enemyTypes';
@@ -164,6 +170,11 @@ export class Game {
   /** Position of this world's exit portal, once the Heart is restored. */
   private portal: { x: number; y: number; z: number; object: THREE.Object3D | null } | null = null;
   private portalPulse = 0;
+
+  /** When the next selection card is worth showing. */
+  private cadence: CadenceState = createCadenceState();
+  /** Unlucky-streak protection across selection screens. */
+  private rewardLuck: RewardLuck = createRewardLuck();
 
   /** The chest reward currently being presented. */
   private pendingChest: { outcome: ChestOutcome; propId: number } | null = null;
@@ -271,6 +282,7 @@ export class Game {
       telegraph: (x, y, z, radius, seconds, color) =>
         this.telegraphs.add(x, y, z, radius, seconds, color),
       offscreenWarning: (fromX, fromZ) => this.showDamageDirection(fromX, fromZ, true),
+      onNearMiss: () => this.onNearMiss(),
       onEnemyKilled: (kind, elites) => this.onEnemyKilled(kind, elites),
       // Enemy *damage* runs on its own flatter curve; enemy health uses
       // `run.difficulty` through `setDifficulty`.
@@ -762,6 +774,7 @@ export class Game {
       })),
       this.run.build.buildPaths(),
       this.run.build.synergies(),
+      this.run.build.caps(),
     );
     this.persist();
     this.audio.play('ui-back');
@@ -1081,6 +1094,9 @@ export class Game {
     if (shift && (moveX !== 0 || moveZ !== 0)) this.tracker.sprinted = true;
 
     this.player.update(dt, moveX, moveZ, jump, shift);
+    // `unmoved`: armour accrues while the player holds their ground and is
+    // spent the moment they move.
+    this.player.tickStance(dt, moveX !== 0 || moveZ !== 0);
     this.tracker.distanceMoved += this.player.position.distanceTo(this.lastPlayerPos);
     this.lastPlayerPos.copy(this.player.position);
 
@@ -1143,6 +1159,7 @@ export class Game {
     this.props.update(dt, this.player.position, this.renderer.renderDistanceUnits);
     this.projectiles.update(dt, this.world);
     this.enemies.update(dt, this.player.position, this.player.alive);
+    if (this.enemies.encounterStatus.justResolved) this.credit('encounter');
     this.enemies.harvestDeaths();
     this.shrines.update(dt, this.player.position, this.enemies, this.worldMode === 'peaceful');
     this.particles.update(dt);
@@ -1187,6 +1204,11 @@ export class Game {
       return;
     }
     if (this.storyBannerTimer > 0) this.storyBannerTimer -= dt;
+
+    // Reward cadence: the clock always runs, but a card is only offered once
+    // the world is quiet enough for the player to read it.
+    tickCadence(this.cadence, dt);
+    this.maybeOfferRewards();
 
     this.updateTutorial();
     this.updateHud();
@@ -1879,8 +1901,8 @@ export class Game {
     this.ui.elementFlash(ELEMENTS[SHRINE_SITES[index]!.element].color, 0.5);
 
     this.save.respawn = this.safeSpotNear(this.shrines.shrines[index]!.anchor);
+    this.credit('objective');
 
-    this.run.completeEncounter();
     const upgradeIndex = Math.min(SHRINE_UPGRADES.length - 1, this.save.upgrades);
     this.save.upgrades = Math.min(SHRINE_UPGRADES.length, this.save.upgrades + 1);
     const stats = accumulateUpgrades(this.save.upgrades, isConvergence(this.affinity));
@@ -1932,6 +1954,7 @@ export class Game {
   }
 
   private onGuardianDefeated(index: number): void {
+    this.credit('guardian');
     this.shrines.markGuardianDefeated(index);
     if (this.save) {
       this.save.guardians[index] = true;
@@ -2308,6 +2331,11 @@ export class Game {
       return;
     }
 
+    // A chest's contents are drawn from the world seed and the chest's own id,
+    // not from Math.random. Its rarity was already seeded; without this its
+    // *contents* changed every time the world was reloaded, so a player could
+    // reload until a chest paid out what they wanted.
+    const chestRandom = mulberry32(((this.save?.seed ?? 0) ^ (prop.id * 2654435761)) >>> 0);
     const outcome = rollChestOutcome(
       this.run.build,
       {
@@ -2318,7 +2346,7 @@ export class Game {
         maxHealth: this.player.maxHealth,
         maxMana: this.player.maxEnergy,
       },
-      Math.random,
+      chestRandom,
       prop.rarity,
     );
 
@@ -2334,6 +2362,8 @@ export class Game {
 
     this.applyChestOutcome(outcome);
     this.pendingChest = { outcome, propId: prop.id };
+    // Finding a good chest is an accomplishment in its own right.
+    if (outcome.rarity !== 'common' && outcome.rarity !== 'uncommon') this.credit('discovery');
 
     // Permanent gains are written to storage immediately, before the player
     // has even dismissed the card.
@@ -2948,6 +2978,21 @@ export class Game {
     this.ui.showDamageArrow(bearing, warningOnly);
   }
 
+  /**
+   * A telegraphed attack resolved without touching the player.
+   *
+   * `perfect-dodge` (Perfect Step) turns that into a reward: a little Mana
+   * back and a little Ultimate charge. Both go through the metered paths, so
+   * a player who stands in a crowd of near misses cannot farm either.
+   */
+  private onNearMiss(): void {
+    const step = this.run.build.grant('perfect-dodge') + this.buffs.grant('perfect-dodge');
+    if (step <= 0) return;
+    this.refundMana(4 * step);
+    this.addUltimateCharge('deflect');
+    this.ui.toast('Perfect Step', 'good', 0.9);
+  }
+
   /** A creature died: count it, and offer a reward when an encounter closes. */
   private onEnemyKilled(kind: EnemyKind, elites: readonly EliteId[]): void {
     const boss = ENEMY_TYPES[kind].role === 'boss';
@@ -2957,17 +3002,46 @@ export class Game {
       this.save.runStats.elitesFelled = this.run.stats.elitesFelled;
       this.save.runStats.bossesFelled = this.run.stats.bossesFelled;
     }
-    // An elite or a boss always closes an encounter and pays out.
-    if (elites.length > 0 || boss) {
-      this.offerRewards(boss ? 2.2 : 1.4);
-    }
+    // What the player achieved is banked; whether that is worth stopping the
+    // game for is the cadence director's decision, not this one's.
+    if (boss) this.credit('boss');
+    else if (elites.length > 0) this.credit('elite');
+  }
+
+  /**
+   * Bank an accomplishment and open the reward screen when one is due.
+   *
+   * Everything that earns a reward comes through here, so the cadence rules
+   * are applied in exactly one place.
+   */
+  private credit(what: Accomplishment): void {
+    recordAccomplishment(this.cadence, what);
+    this.maybeOfferRewards();
+  }
+
+  /**
+   * Offer a selection card if the cadence director says one is due.
+   *
+   * Deliberately refuses while the player is under pressure: a reward screen
+   * that opens mid-fight takes control away at the worst moment, and the
+   * credit simply stays banked until the fight is over.
+   */
+  private maybeOfferRewards(): void {
+    if (this.state !== 'playing') return;
+    if (!shouldOffer(this.cadence)) return;
+    if (this.enemies.hostilePressure(this.player.position, 22)) return;
+    this.offerRewards(offerLuck(this.cadence));
   }
 
   /** Pause safely and present three upgrade choices. */
   private offerRewards(luck: number): void {
     if (this.state !== 'playing') return;
-    const offers = this.run.offerRewards(Math.random, luck);
+    const offers = this.run.offerRewards(Math.random, luck, 3, pityPush(this.rewardLuck));
     if (offers.length === 0) return;
+    // Record what was actually offered, so a run of poor screens starts
+    // pushing the odds up rather than repeating itself.
+    noteOffers(this.rewardLuck, offers);
+    consumeOffer(this.cadence);
     this.run.completeEncounter();
     this.persist();
     this.input.exitLock();
@@ -3023,6 +3097,14 @@ export class Game {
     this.player.sprintScale = m.sprintScale;
     this.player.bonusOxygen = m.oxygenCapacity;
     this.player.oxygenDrainScale = m.oxygenDrain;
+
+    // Behaviour grants the player body owns rather than the ability system:
+    // extra dashes, a shield laid down by healing, and the two stance armours.
+    const grant = (tag: string): number => this.run.build.grant(tag) + this.buffs.grant(tag);
+    this.player.bonusAirDashes = grant('extra-dash');
+    this.player.healShieldFraction = Math.min(0.6, grant('heal-shield') * 0.35);
+    this.player.groundArmor = Math.min(0.2, grant('ground-armor') * 0.07);
+    this.player.unmovedArmor = Math.min(0.12, grant('unmoved') * 0.045);
   }
 
   // ------------------------------------------------------- development API

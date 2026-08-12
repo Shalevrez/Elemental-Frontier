@@ -36,6 +36,7 @@ it made of blocks.
 - [Worlds](#worlds)
 - [Swimming and oxygen](#swimming-and-oxygen)
 - [Chests](#chests)
+- [Rewards and growth](#rewards-and-growth)
 - [Reward cards and tradeoffs](#reward-cards-and-tradeoffs)
 - [Save data](#save-data)
 - [Project structure](#project-structure)
@@ -780,6 +781,56 @@ exclusive with Glass Cannon so the two multipliers can never be stacked.
 
 ---
 
+## Rewards and growth
+
+### When a card appears
+
+A selection card follows an **accomplishment**, not a kill count. Clearing a real
+encounter, defeating an elite, finishing an objective, finding a good chest and
+putting down a guardian each pay credit toward the next choice:
+
+| Accomplishment | Credit |
+| --- | --- |
+| Encounter cleared | 1 |
+| Hidden discovery / rare chest | 1 |
+| Elite defeated | 2 |
+| Objective completed | 2 |
+| Guardian defeated | 4 (offered immediately) |
+| World boss defeated | 6 (offered immediately) |
+
+Three credits opens a screen, and a minimum gap of 75 seconds stops a run of
+quick wins from becoming a run of menus. If five minutes pass with any credit
+banked, the card comes anyway — so a careful player is never left out. The first
+three cards arrive on a shorter leash, so a build direction can form inside the
+first world. A card never opens while something is still attacking you; the
+credit simply waits.
+
+### Rarity and what it buys
+
+Higher rarity buys **mechanics**, not bigger percentages. Every card in the pool
+is priced against a budget for its rarity: a ceiling on how much raw stat it may
+carry, and — from Rare upward — a requirement that it either switches on a
+behaviour or spends a genuinely rarity-sized effect. Every Legendary changes how
+an ability works.
+
+Nothing a card promises is decorative: every behaviour tag in the pool is
+implemented and the test suite refuses to let an unimplemented one ship.
+
+A run of screens with nothing of Rare or better quietly improves the odds on the
+next one, up to a cap, and resets the moment a Rare appears. It softens bad luck
+without ever becoming a guarantee.
+
+### Stacking
+
+Modifiers combine additively (health, crit chance, Mana return) or
+multiplicatively (damage, cooldowns, area, status duration). Multiplicative
+damage had no ceiling at all: five stacks of Honed Focus with Overcharge and one
+of the two doubling rewards reached ×5.3, and critical damage another ×5.4 on
+top. Damage is now capped at **×4**, single-element damage at **×2** and critical
+damage at **×4** — high enough that a deliberate power build still feels like
+one, and the pause screen names every ceiling you have reached rather than
+quietly applying less than your cards promised.
+
 ## Reward cards and tradeoffs
 
 Post-encounter cards show the reward's name, element sigil, rarity, exact numeric effects (gains in
@@ -901,6 +952,7 @@ elemental-frontier/
     │   ├── chests.ts           chest rarity, contents and blessings
     │   ├── buffs.ts            timed blessings and modifier combination
     │   ├── ultimate.ts         the Ultimate charge meter
+    │   ├── cadence.ts          when a selection card is worth showing (pure)
     │   └── mana.ts             the Mana economy
     ├── combat/
     │   ├── Enemies.ts          creature bodies, AI, damage, drops, peaceful mode
@@ -952,6 +1004,12 @@ npm test
   fallback cast, oxygen drain, recovery and drowning cadence, elemental terrain interactions, story
   sequencing, world distinctness and the redesigned monsters.
 - **Save** — version 4 → 5 migration keeping everything and defaulting the new layer safely.
+- **Rewards** — cadence gates and the 2-5 minute target, rarity distribution over thousands of
+  seeded rolls, unlucky-streak protection, every card priced against its rarity budget, every
+  promised behaviour actually implemented, no vague card copy, tradeoff costs and safe minimums,
+  Double Damage's uniqueness and exclusions, stacking ceilings, previews matching the real
+  calculation path, per-element build directions, Convergence compatibility, deterministic chest
+  contents, exhausted-pool fallbacks, and build persistence across transitions and death.
 - **Balance** — deterministic time-to-kill for every creature against every element, per-hit
   incoming-damage ceilings, cooldown and cost ordering, Mana regeneration and refund throttling,
   cost-reduction caps, Ultimate charge rate limits and per-source caps, weighted attack-token

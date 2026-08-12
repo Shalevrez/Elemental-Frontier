@@ -223,6 +223,13 @@ export function rollChestOutcome(
 
 function upgradeOutcome(def: UpgradeDef, rarity: ChestRarity): ChestOutcome {
   const { benefits, penalties } = describeUpgrade(def, 1);
+  // A reward whose whole value is a behaviour - an extra projectile, a
+  // mutation - moves no stat, so `describeUpgrade` has nothing to list. The
+  // card would then show a name and no effect at all, which reads as an empty
+  // chest. Fall back to what the upgrade says it does.
+  if (benefits.length === 0 && penalties.length === 0) {
+    benefits.push({ text: def.description, tone: 'good' });
+  }
   return {
     kind: 'upgrade',
     rarity,

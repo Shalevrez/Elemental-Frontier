@@ -25,6 +25,141 @@ export const RARITY_COLORS: Readonly<Record<Rarity, number>> = Object.freeze({
   legendary: 0xffb03a,
 });
 
+/**
+ * Power budget per rarity.
+ *
+ * A card has two kinds of value and they are not interchangeable, so they are
+ * priced separately:
+ *
+ *  - **Stat power** is the percentages: damage, cooldowns, health, armour.
+ *    `maxStat` is the ceiling, and it is what catches a Common doing an Epic's
+ *    work or an Epic quietly carrying a Legendary's numbers.
+ *  - **Behaviour** is a grant: a mutation, a new interaction, a mechanic the
+ *    build switches on. It is what the higher rarities are *for*.
+ *
+ * A card clears its budget when it stays under the stat ceiling and carries
+ * either enough stat power to be felt or at least one behaviour. From Rare
+ * upward it must also be more than a percentage: either a behaviour, or a
+ * stat budget genuinely worth its rarity.
+ */
+export const RARITY_BUDGET: Readonly<Record<Rarity, { minStat: number; maxStat: number; substantial: number }>> =
+  Object.freeze({
+    common: { minStat: 2, maxStat: 16, substantial: 2 },
+    uncommon: { minStat: 4, maxStat: 30, substantial: 4 },
+    rare: { minStat: 4, maxStat: 46, substantial: 12 },
+    epic: { minStat: 6, maxStat: 78, substantial: 18 },
+    legendary: { minStat: 6, maxStat: 110, substantial: 22 },
+  });
+
+/**
+ * How much a single stat change is worth, in budget points per unit.
+ *
+ * Multiplicative stats are scored on their distance from 1, additive ones on
+ * their magnitude, and a penalty scores exactly as loudly as a benefit of the
+ * same size - which is what stops a tradeoff from being priced as a pure gain.
+ */
+const STAT_WEIGHT: Partial<Record<keyof StatModifiers, number>> = {
+  damageScale: 60, fireScale: 42, waterScale: 42, earthScale: 42, airScale: 42,
+  cooldownScale: 55, costScale: 40, moveScale: 40, projectileSpeed: 14, projectileSize: 14,
+  statusDuration: 26, knockback: 16, maxHealthScale: 45, maxEnergyScale: 32,
+  regenScale: 26, areaScale: 30, directScale: 34, normalHitScale: 40, rangeScale: 24,
+  aimAssistScale: 12, ultimateDamage: 26, ultimateGain: 40, sprintScale: 14, oxygenDrain: 8,
+  statusPower: 30,
+  // Additive stats, scored per point.
+  maxHealth: 0.22, maxEnergy: 0.18, energyRegen: 2.4, critChance: 110, critScale: 30,
+  armor: 110, lifesteal: 240, oxygenCapacity: 0.18, manaOnHit: 8, manaOnKill: 1.2,
+};
+
+/**
+ * Score of the percentage half of one stack of an upgrade.
+ *
+ * Deterministic and pure, so the tests can price the whole pool at once.
+ */
+export function upgradeStatPower(def: UpgradeDef): number {
+  let score = 0;
+  for (const key of Object.keys(def.stats ?? {}) as (keyof StatModifiers)[]) {
+    const value = def.stats?.[key];
+    if (value === undefined) continue;
+    const weight = STAT_WEIGHT[key] ?? 0;
+    const magnitude = MULTIPLICATIVE.includes(key) ? Math.abs(value - 1) : Math.abs(value);
+    score += magnitude * weight;
+  }
+  return score;
+}
+
+/** How many behaviours a card switches on. */
+export function behaviourCount(def: UpgradeDef): number {
+  return def.grants?.length ?? 0;
+}
+
+/**
+ * Is this card priced correctly for its rarity?
+ *
+ * Returns the reasons it is not, so a failing test can name them.
+ */
+export function budgetProblems(def: UpgradeDef): string[] {
+  const budget = RARITY_BUDGET[def.rarity];
+  const stat = upgradeStatPower(def);
+  const behaviour = behaviourCount(def);
+  const problems: string[] = [];
+  if (stat > budget.maxStat) problems.push(`too strong for ${def.rarity} (${stat.toFixed(1)} > ${budget.maxStat})`);
+  if (stat < budget.minStat && behaviour === 0) problems.push('too weak to notice');
+  // From Rare upward a card must be more than a percentage.
+  const needsSubstance = def.rarity === 'rare' || def.rarity === 'epic' || def.rarity === 'legendary';
+  if (needsSubstance && behaviour === 0 && stat < budget.substantial) {
+    problems.push(`${def.rarity} with neither a behaviour nor a rarity-sized effect`);
+  }
+  return problems;
+}
+
+/**
+ * Every behaviour tag the gameplay code actually reads.
+ *
+ * A card that grants a tag which nothing implements is a card that does
+ * nothing, and there were twenty-three of them. This registry is the guard
+ * against that returning: the balance tests assert that every `grants` entry
+ * in the pool appears here, so adding a tag to a card without wiring it up
+ * fails the suite rather than shipping an inert reward.
+ *
+ * Kept in the data layer deliberately - it is a statement about the pool, not
+ * about any one ability.
+ */
+export const IMPLEMENTED_BEHAVIOURS: ReadonlySet<string> = new Set([
+  // Fire
+  'split', 'corpse-explode', 'burning-ground', 'crit-spread', 'rampage', 'last-stand',
+  'conflagration', 'burn-contagion', 'blast-core', 'mutate-ember-rain', 'ultimate-fire',
+  // Water
+  'whip-return', 'shatter-nova', 'freeze-spread', 'heal-shield', 'ice-shards',
+  'deep-current', 'glacier', 'mend-on-status', 'whip-wide', 'bounce',
+  'mutate-whip-shard', 'ultimate-water',
+  // Earth
+  'rock-fragment', 'rock-bounce', 'wall-explode', 'wall-armor', 'wall-slam-stun',
+  'ground-cracks', 'slam-wide', 'unmoved', 'tectonic', 'ground-armor',
+  'deform-strength', 'mutate-mortar', 'ultimate-earth',
+  // Air
+  'dash-tornado', 'gust-double', 'dash-damage', 'speed-damage', 'deflect-burst',
+  'extra-dash', 'gust-reflect-source', 'tempest', 'hazard-slam', 'pull-strength',
+  'mutate-gust-lance', 'ultimate-air',
+  // Any element
+  'echo-cast', 'extra-projectile', 'extra-blade', 'perfect-dodge', 'temp-shield',
+]);
+
+/**
+ * Tags that are labels rather than behaviours.
+ *
+ * These two describe something the card's own `stats` already deliver in full:
+ * Slow Sun really does fire a larger, slower, heavier ember, and Double Damage
+ * really does double damage - through `projectileSize` / `projectileSpeed` and
+ * through `damageScale`. The tag exists so other systems can recognise the
+ * card; there is deliberately no separate behaviour behind it.
+ *
+ * Anything not in this set and not in `IMPLEMENTED_BEHAVIOURS` is a promise
+ * the game does not keep, which is what the balance tests refuse to allow.
+ */
+export const DECLARATIVE_BEHAVIOURS: ReadonlySet<string> = new Set([
+  'big-slow-projectile', 'double-damage',
+]);
+
 /** Base draw weights. Higher rarities get rarer, but never impossible. */
 export const RARITY_WEIGHTS: Readonly<Record<Rarity, number>> = Object.freeze({
   common: 100,
@@ -236,7 +371,7 @@ const FIRE: UpgradeDef[] = [
     stats: { critChance: 0.12 }, hooks: ['onEnemyDamaged'], synergy: ['critical', 'burning'],
   }),
   up({
-    id: 'fire-heavy-ember', name: 'Slow Sun', rarity: 'uncommon', element: 'fire',
+    id: 'fire-heavy-ember', name: 'Slow Sun', rarity: 'rare', element: 'fire',
     description: 'Fireball becomes much larger and heavier, but travels slowly.',
     tags: ['explosions'], grants: ['big-slow-projectile'], maxStacks: 1,
     stats: { projectileSize: 1.9, projectileSpeed: 0.55, fireScale: 1.45 },
@@ -306,7 +441,7 @@ const WATER: UpgradeDef[] = [
   }),
   up({
     id: 'water-deep-current', name: 'Deep Current', rarity: 'epic', element: 'water',
-    description: 'Wet enemies take far more damage from every source.',
+    description: 'Wet enemies take 35% more damage from every source.',
     tags: ['control'], grants: ['deep-current'], maxStacks: 1,
     hooks: ['onEnemyDamaged'], synergy: ['wet'],
   }),
@@ -465,7 +600,7 @@ const GENERIC: UpgradeDef[] = [
   }),
   up({
     id: 'any-cruel-edge', name: 'Cruel Edge', rarity: 'rare', element: 'any',
-    description: 'Critical hits deal far more damage.',
+    description: 'Critical damage +0.6×.',
     tags: ['critical'], maxStacks: 3, stats: { critScale: 0.6 },
     requires: ['any-keen-edge'], synergy: ['critical'],
   }),
@@ -476,7 +611,7 @@ const GENERIC: UpgradeDef[] = [
   }),
   up({
     id: 'any-siphon', name: 'Siphon', rarity: 'rare', element: 'any',
-    description: 'Heal for a small share of the damage you deal.',
+    description: 'Heal for 5% of the damage you deal.',
     tags: ['sustain'], maxStacks: 3, stats: { lifesteal: 0.05 }, synergy: ['sustain'],
   }),
   up({
@@ -486,7 +621,7 @@ const GENERIC: UpgradeDef[] = [
   }),
   up({
     id: 'any-overcharge', name: 'Overcharge', rarity: 'epic', element: 'any',
-    description: 'Big damage, but every ability costs far more Mana.',
+    description: 'All elemental damage +50%. Ability Mana costs +45%.',
     tags: ['power'], maxStacks: 1, stats: { damageScale: 1.5, costScale: 1.45 },
   }),
   up({
@@ -509,7 +644,7 @@ const DEPTH: UpgradeDef[] = [
   // ---- WATER: freeze/shatter, healing/shields, streams & control
   up({
     id: 'water-mending-tide', name: 'Mending Tide', rarity: 'uncommon', element: 'water',
-    description: 'Freezing or soaking a creature knits a little of you back together.',
+    description: 'Freezing or soaking a creature heals you for 1.6, and returns 1.2 Mana per hit.',
     tags: ['healing'], grants: ['mend-on-status'], maxStacks: 3,
     stats: { manaOnHit: 1.2 }, hooks: ['onStatusApplied'], synergy: ['sustain', 'barriers'],
   }),
@@ -638,17 +773,17 @@ const DEPTH: UpgradeDef[] = [
   // ---- Mana and oxygen support, available to everybody
   up({
     id: 'any-wellspring', name: 'Wellspring', rarity: 'uncommon', element: 'any',
-    description: 'Damaging a creature returns a little Mana.',
+    description: 'Damaging a creature returns 1.6 Mana.',
     tags: ['sustain', 'mana'], maxStacks: 4, stats: { manaOnHit: 1.6 }, synergy: ['sustain'],
   }),
   up({
     id: 'any-reclaim', name: 'Reclaim', rarity: 'uncommon', element: 'any',
-    description: 'Defeating a creature returns Mana.',
+    description: 'Defeating a creature returns 8 Mana.',
     tags: ['sustain', 'mana'], maxStacks: 4, stats: { manaOnKill: 8 }, synergy: ['sustain'],
   }),
   up({
     id: 'any-second-breath', name: 'Second Breath', rarity: 'common', element: 'any',
-    description: 'Hold your breath for much longer, and use it more slowly.',
+    description: 'Oxygen +8s, and it drains 12% more slowly.',
     tags: ['sustain'], maxStacks: 3, stats: { oxygenCapacity: 8, oxygenDrain: 0.88 },
   }),
   up({
@@ -659,7 +794,7 @@ const DEPTH: UpgradeDef[] = [
   }),
   up({
     id: 'any-ascendant', name: 'Ascendant', rarity: 'uncommon', element: 'any',
-    description: 'The Ultimate meter fills noticeably faster.',
+    description: 'The Ultimate meter fills 18% faster.',
     tags: ['ultimate'], maxStacks: 3, stats: { ultimateGain: 1.18 }, synergy: ['ultimate'],
   }),
 ];
@@ -775,15 +910,15 @@ const CHEST_UPGRADES: UpgradeDef[] = [
   }),
   up({
     id: 'chest-vital-surge', name: 'Vital Surge', rarity: 'rare', element: 'any',
-    description: 'Maximum health +40.',
+    description: 'Maximum health +55.',
     tags: ['sustain'], maxStacks: 6, source: 'chest', permanence: 'save',
-    stats: { maxHealth: 40 },
+    stats: { maxHealth: 55 },
   }),
   up({
     id: 'chest-mana-font', name: 'Mana Font', rarity: 'rare', element: 'any',
-    description: 'Maximum Mana +35 and regeneration +2/s.',
+    description: 'Maximum Mana +45 and regeneration +2.5/s.',
     tags: ['mana'], maxStacks: 6, source: 'chest', permanence: 'save',
-    stats: { maxEnergy: 35, energyRegen: 2 },
+    stats: { maxEnergy: 45, energyRegen: 2.5 },
   }),
   up({
     id: 'chest-fleetfoot', name: 'Fleetfoot', rarity: 'uncommon', element: 'any',
@@ -805,24 +940,24 @@ const CHEST_UPGRADES: UpgradeDef[] = [
   }),
   up({
     id: 'chest-keen', name: 'Keen Instinct', rarity: 'rare', element: 'any',
-    description: 'Critical chance +8%.',
+    description: 'Critical chance +11%.',
     tags: ['critical'], maxStacks: 4, source: 'chest', permanence: 'save',
-    stats: { critChance: 0.08 }, synergy: ['critical'],
+    stats: { critChance: 0.11 }, synergy: ['critical'],
   }),
   up({
     id: 'chest-brutal', name: 'Brutal Instinct', rarity: 'epic', element: 'any',
-    description: 'Critical damage +0.5×.',
+    description: 'Critical damage +0.6×.',
     tags: ['critical'], maxStacks: 3, source: 'chest', permanence: 'save',
-    stats: { critScale: 0.5 }, synergy: ['critical'],
+    stats: { critScale: 0.6 }, synergy: ['critical'],
   }),
   up({
     id: 'chest-hardened', name: 'Hardened', rarity: 'rare', element: 'any',
-    description: 'Damage taken −10%.',
+    description: 'Damage taken −12%.',
     tags: ['armor'], maxStacks: 4, source: 'chest', permanence: 'save',
-    stats: { armor: 0.1 }, synergy: ['armor'],
+    stats: { armor: 0.12 }, synergy: ['armor'],
   }),
   up({
-    id: 'chest-wide-reach', name: 'Wide Reach', rarity: 'rare', element: 'any',
+    id: 'chest-wide-reach', name: 'Wide Reach', rarity: 'uncommon', element: 'any',
     description: 'Area of effect +18%.',
     tags: ['explosions'], maxStacks: 3, source: 'chest', permanence: 'save',
     stats: { areaScale: 1.18 },
@@ -840,10 +975,10 @@ const CHEST_UPGRADES: UpgradeDef[] = [
     stats: { statusPower: 1.25, statusDuration: 1.2 }, synergy: ['control'],
   }),
   up({
-    id: 'chest-ultimate-well', name: 'Ultimate Well', rarity: 'epic', element: 'any',
-    description: 'The Ultimate meter fills 25% faster.',
+    id: 'chest-ultimate-well', name: 'Ultimate Well', rarity: 'rare', element: 'any',
+    description: 'The Ultimate meter fills 35% faster.',
     tags: ['ultimate'], maxStacks: 2, source: 'chest', permanence: 'save',
-    stats: { ultimateGain: 1.25 }, synergy: ['ultimate'],
+    stats: { ultimateGain: 1.35 }, synergy: ['ultimate'],
   }),
   up({
     id: 'chest-emberheart', name: 'Emberheart', rarity: 'epic', element: 'fire',
@@ -939,6 +1074,30 @@ export function accumulateStats(target: StatModifiers, def: UpgradeDef, stacks: 
  * health, Mana, movement, range - below a playable minimum.
  */
 export function clampStats(stats: StatModifiers): StatModifiers {
+  // ---- multipliers that had no ceiling at all.
+  //
+  // Damage, element damage and critical damage all combine multiplicatively,
+  // and nothing stopped them. Five stacks of Honed Focus, Overcharge and one
+  // of the two doubling rewards reached x5.3 on their own, and crit damage
+  // reached x5.4 on top of that - which is not a strong build, it is the rest
+  // of the campaign switched off. These ceilings are set high enough that a
+  // deliberate power build still feels like one and only clip the extremes,
+  // and `cappedStats` reports which are in force so the player can see it.
+  stats.damageScale = Math.min(DAMAGE_CAPS.damageScale, Math.max(0.4, stats.damageScale));
+  stats.fireScale = Math.min(DAMAGE_CAPS.elementScale, Math.max(0.4, stats.fireScale));
+  stats.waterScale = Math.min(DAMAGE_CAPS.elementScale, Math.max(0.4, stats.waterScale));
+  stats.earthScale = Math.min(DAMAGE_CAPS.elementScale, Math.max(0.4, stats.earthScale));
+  stats.airScale = Math.min(DAMAGE_CAPS.elementScale, Math.max(0.4, stats.airScale));
+  stats.critScale = Math.min(DAMAGE_CAPS.critScale, Math.max(1, stats.critScale));
+  stats.statusDuration = Math.min(2.5, Math.max(0.5, stats.statusDuration));
+  stats.knockback = Math.min(2.5, Math.max(0.4, stats.knockback));
+  stats.projectileSpeed = Math.min(2, Math.max(0.4, stats.projectileSpeed));
+  stats.projectileSize = Math.min(2.5, Math.max(0.5, stats.projectileSize));
+  // Flat pools: generous, but not unbounded.
+  stats.maxHealth = Math.min(420, Math.max(-60, stats.maxHealth));
+  stats.maxEnergy = Math.min(350, Math.max(-50, stats.maxEnergy));
+  stats.energyRegen = Math.min(25, Math.max(-4, stats.energyRegen));
+
   stats.armor = Math.min(0.75, Math.max(0, stats.armor));
   stats.critChance = Math.min(0.85, Math.max(0, stats.critChance));
   stats.cooldownScale = Math.max(0.25, stats.cooldownScale);
@@ -963,6 +1122,38 @@ export function clampStats(stats: StatModifiers): StatModifiers {
   stats.manaOnHit = Math.min(20, Math.max(0, stats.manaOnHit));
   stats.manaOnKill = Math.min(60, Math.max(0, stats.manaOnKill));
   return stats;
+}
+
+/**
+ * Ceilings on the multipliers that combine multiplicatively.
+ *
+ * Kept as named constants because the balance tests assert against them and
+ * the pause screen reads them to tell the player when one is in force.
+ */
+export const DAMAGE_CAPS = Object.freeze({
+  damageScale: 4,
+  elementScale: 2,
+  critScale: 4,
+});
+
+/**
+ * Which of a build's multipliers are currently pinned at their ceiling.
+ *
+ * A cap the player cannot see is a lie about their build, so the pause screen
+ * shows every one that is in force alongside the value it is holding.
+ */
+export function cappedStats(raw: Readonly<StatModifiers>): { label: string; value: string }[] {
+  const out: { label: string; value: string }[] = [];
+  const check = (value: number, cap: number, label: string): void => {
+    if (value > cap + 1e-9) out.push({ label, value: `x${cap.toFixed(2)}` });
+  };
+  check(raw.damageScale, DAMAGE_CAPS.damageScale, 'All elemental damage');
+  check(raw.fireScale, DAMAGE_CAPS.elementScale, 'Fire damage');
+  check(raw.waterScale, DAMAGE_CAPS.elementScale, 'Water damage');
+  check(raw.earthScale, DAMAGE_CAPS.elementScale, 'Earth damage');
+  check(raw.airScale, DAMAGE_CAPS.elementScale, 'Air damage');
+  check(raw.critScale, DAMAGE_CAPS.critScale, 'Critical damage');
+  return out;
 }
 
 /**

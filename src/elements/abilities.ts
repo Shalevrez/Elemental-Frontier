@@ -544,6 +544,12 @@ export class AbilitySystem {
       const seconds = status.seconds * m.statusDuration * durationModifier(status.id, e.status);
       e.status.apply(status.id, seconds, (status.magnitude ?? 0) * m.statusPower);
       this.charge('status-applied');
+      // `mend-on-status`: chilling or soaking a creature knits a little of the
+      // caster back together. Rate-limited by the heal path itself.
+      const mend = this.g('mend-on-status');
+      if (mend > 0 && (status.id === 'wet' || status.id === 'frozen' || status.id === 'slowed')) {
+        this.ctx.lifesteal(1.6 * mend);
+      }
     }
 
     // ---- Ultimate charge and Mana economy, fed only by real combat.
@@ -554,6 +560,35 @@ export class AbilitySystem {
     if (wasAlive && !e.alive) {
       this.charge('enemy-defeated');
       if (m.manaOnKill > 0) this.ctx.refundMana?.(m.manaOnKill);
+      this.onDefeated(e, dealt);
+    }
+
+    // `burn-contagion`: burning spreads from a burning creature to whatever is
+    // pressed up against it, which is what makes a crowd the right target.
+    const contagion = this.g('burn-contagion');
+    if (contagion > 0 && e.alive && e.status.has('burning')) {
+      const source = e.status.get('burning');
+      for (const other of this.ctx.enemies.within(e.center, 3 + contagion, _scratch2)) {
+        if (other === e || other.status.has('burning')) continue;
+        other.status.apply(
+          'burning', STATUS_TUNING.burnSeconds * 0.7 * m.statusDuration,
+          Math.max(1, (source?.magnitude ?? STATUS_TUNING.burnDps) * 0.6) * m.statusPower,
+        );
+      }
+    }
+
+    // `conflagration`: burning stacks build on a target instead of merely
+    // refreshing, and the stack count adds real force to every fire hit.
+    const blaze = this.g('conflagration');
+    if (blaze > 0 && element === 'fire' && e.alive) {
+      const burning = e.status.get('burning');
+      if (burning) {
+        burning.stacks = Math.min(5, burning.stacks + 1);
+        burning.magnitude = Math.max(
+          burning.magnitude,
+          this.power(STATUS_TUNING.burnDps * 0.55, 'fire') * m.statusPower,
+        );
+      }
     }
 
     // `rampage`: fire hits stack attack speed briefly.
@@ -578,6 +613,24 @@ export class AbilitySystem {
         if (other === e || hopped >= hops) continue;
         hopped++;
         other.damage(dealt * 0.5, 'water', null, 0);
+      }
+    }
+
+    // `hazard-slam`: anything blown into terrain or a hazard takes the impact
+    // as real damage, which is what turns Air's knockback into a damage source.
+    const slam = this.g('hazard-slam');
+    if (kb && slam > 0) {
+      _to.copy(e.pos).addScaledVector(kb, 0.14);
+      const intoTerrain = this.ctx.world.isSolid(_to.x, _to.y + 0.8, _to.z);
+      const intoHazard = (this.ctx.effects?.damageAt(_to.x, _to.y, _to.z) ?? 0) > 0
+        || this.ctx.world.inHazardFluid(_to.y);
+      if (intoTerrain || intoHazard) {
+        e.damage(dealt * 0.5 * slam, element, null, 0.25);
+        this.ctx.particles.spark({
+          count: 14, x: e.pos.x, y: e.pos.y + 0.9, z: e.pos.z, spread: 0.5,
+          jitter: 4, color: 0xffffff, color2: ELEMENTS.air.color,
+          size: 0.28, life: 0.4, gravity: -1,
+        });
       }
     }
 
@@ -626,6 +679,39 @@ export class AbilitySystem {
     return this.hitEnemy(e, amount, element, kb, stagger, status);
   }
 
+  /**
+   * What a defeated creature leaves behind.
+   *
+   * `corpse-explode` is the Pyre Bloom / Emberheart behaviour: a creature that
+   * dies while burning bursts, igniting whatever was standing around it. This
+   * is deliberately gated on the target actually burning, so it rewards having
+   * set the fight alight rather than paying out on every kill.
+   */
+  private onDefeated(e: Enemy, dealt: number): void {
+    const bloom = this.g('corpse-explode');
+    if (bloom <= 0 || !e.status.has('burning')) return;
+    const c = e.center;
+    const radius = 4 + bloom;
+    for (const other of this.ctx.enemies.within(c, radius, _scratch2)) {
+      if (other === e || !other.alive) continue;
+      _kb.copy(other.center).sub(c).setY(0.3).normalize().multiplyScalar(4);
+      other.damage(this.power(Math.max(8, dealt * 0.35) * bloom, 'fire'), 'fire', _kb, 0.2);
+      other.status.apply(
+        'burning', STATUS_TUNING.burnSeconds * this.mods.statusDuration,
+        this.power(STATUS_TUNING.burnDps * 0.7, 'fire') * this.mods.statusPower,
+      );
+    }
+    this.ctx.effects?.add(
+      'burning', c.x, this.ctx.world.groundHeight(c.x, c.z), c.z,
+      radius * 0.6, 5, this.power(STATUS_TUNING.burnDps * 0.5, 'fire'), 'player',
+    );
+    this.ctx.particles.spark({
+      count: 40, x: c.x, y: c.y, z: c.z, spread: 1, jitter: 7,
+      color: 0xff9b3d, color2: 0xffe08a, size: 0.4, life: 0.7, gravity: 1.6, drag: 1.2,
+    });
+    this.ctx.audio.play('impact', 40);
+  }
+
   /** Visual and mechanical payload of an elemental reaction. */
   private reactionEffect(id: string, e: Enemy, damage: number): void {
     const c = e.center;
@@ -659,6 +745,17 @@ export class AbilitySystem {
             other.damage(damage * 0.4 * nova, 'water', null, 0.2);
           }
         }
+        // `ice-shards`: the broken ice is left on the ground as a cutting
+        // field, so shattering something also denies the space it stood in.
+        const shards = this.g('ice-shards');
+        if (shards > 0) {
+          const ground = this.ctx.world.groundHeight(c.x, c.z);
+          this.ctx.effects?.add(
+            'ice', c.x, ground, c.z, 2.4 + shards * 0.6, 7,
+            this.power(2.6 * shards, 'water'), 'player',
+          );
+          this.ctx.decals.add('ice', c.x, ground + 0.02, c.z, _up, 2.6 + shards * 0.6, 7, 0.6);
+        }
         break;
       }
       case 'spread-fire': {
@@ -684,10 +781,15 @@ export class AbilitySystem {
   private gustBurst(scale = 1): void {
     const { player, enemies, particles, projectiles, audio } = this.ctx;
     const cfg = abilityCombat('gust');
+    // `mutate-gust-lance`: Shearwind trades the cone for a narrow lance that
+    // reaches much further and cuts through everything in the line.
+    const lance = this.hasG('mutate-gust-lance');
     const tempest = this.hasG('tempest');
-    const range = (tempest ? cfg.range * 1.3 : cfg.range) * scale;
+    const range = (tempest ? cfg.range * 1.3 : cfg.range) * scale * (lance ? 2.2 : 1);
     const halfAngle = tempest ? cfg.coneHalfAngle! * 1.3 : cfg.coneHalfAngle!;
-    const cosHalf = Math.cos(halfAngle);
+    // Shearwind is a lance, not a fan: a much narrower angle over a much
+    // longer reach, hitting everything along the line.
+    const cosHalf = Math.cos(lance ? Math.min(halfAngle, 0.16) : halfAngle);
 
     const solution = this.aim(range, false);
     this.castOrigin(_origin);
@@ -756,6 +858,21 @@ export class AbilitySystem {
     const reflectToSource = this.hasG('gust-reflect-source');
     const deflected = projectiles.deflect(_origin, _dir, range, cosHalf, 22, reflectToSource);
     if (deflected > 0) {
+      // `deflect-burst`: a turned projectile bursts into a wind explosion
+      // rather than simply flying back.
+      const burst = this.g('deflect-burst');
+      if (burst > 0) {
+        const centre = _origin.clone().addScaledVector(_dir, range * 0.45);
+        for (const e of enemies.within(centre, 4.5 + burst, _scratch2)) {
+          _kb.copy(e.center).sub(centre).setY(0.2).normalize()
+            .multiplyScalar(this.power(cfg.knockback * 0.7, 'air'));
+          this.damageEnemy(e, this.power(7 * burst * deflected, 'air'), 'air', _kb, 0.2);
+        }
+        particles.spark({
+          count: 30, x: centre.x, y: centre.y, z: centre.z, spread: 1.4, jitter: 6,
+          color: 0xffffff, color2: ELEMENTS.air.color, size: 0.34, life: 0.5, gravity: 1,
+        });
+      }
       this.charge('deflect');
       this.ctx.toast(`Deflected ${deflected} projectile${deflected === 1 ? '' : 's'}`, 'good');
       this.ctx.hitMarker(true);
@@ -770,7 +887,7 @@ export class AbilitySystem {
   private airDash(): UseResult {
     const { player, particles, audio, enemies } = this.ctx;
     const cfg = abilityCombat('air-dash');
-    if (!player.onGround && !player.airDashAvailable) return 'blocked';
+    if (!player.canAirDash()) return 'blocked';
 
     player.getForward(_fwd);
     const planar = new THREE.Vector3(player.velocity.x, 0, player.velocity.z);
@@ -780,7 +897,7 @@ export class AbilitySystem {
     player.velocity.x = dir.x * 19;
     player.velocity.z = dir.z * 19;
     player.velocity.y = Math.max(player.velocity.y, player.onGround ? 4.2 : 3.2);
-    if (!player.onGround) player.airDashAvailable = false;
+    player.consumeAirDash();
     player.dashGrace = 1.6;
     player.falling = false;
     player.fallStartY = player.position.y;
@@ -865,6 +982,30 @@ export class AbilitySystem {
     // Run the first slice immediately so the very first frame can connect.
     this.tickStream(0);
 
+    // `mutate-whip-shard`: the stream is preceded by a shard of ice that
+    // pierces the first creature it meets - the Frozen Core mutation.
+    if (this.hasG('mutate-whip-shard')) {
+      const solution = this.aim(cfg.range * 2.4 * this.mods.rangeScale);
+      this.castOrigin(_origin);
+      this.ctx.projectiles.spawn({
+        kind: 'bolt', owner: 'player',
+        origin: _origin.clone(),
+        direction: new THREE.Vector3(
+          solution.direction.x, solution.direction.y, solution.direction.z,
+        ),
+        speed: 46 * this.mods.projectileSpeed,
+        damage: this.power(cfg.damage * 0.9, 'water'),
+        radius: 0.38 * this.mods.projectileSize,
+        life: 1.4, color: ELEMENTS.water.color,
+        element: 'water',
+        // The shard carries through: it fragments on impact rather than
+        // stopping at the first body it meets.
+        fragments: 2,
+        slow: STATUS_TUNING.whipSlowSeconds,
+        stagger: 0.2,
+      });
+    }
+
     if (this.hasG('whip-return')) {
       this.later(cfg.castTime ?? 0.32, () => {
         this.ticks.clear();
@@ -926,7 +1067,10 @@ export class AbilitySystem {
     _probeB.x = _origin.x + _dir.x * tipDistance;
     _probeB.y = _origin.y + _dir.y * tipDistance;
     _probeB.z = _origin.z + _dir.z * tipDistance;
-    const volume = { a: _probeA, b: _probeB, radius: cfg.radius };
+    // `whip-wide`: Torrent broadens the stream so it sweeps several targets
+    // instead of tracking one.
+    const widen = 1 + this.g('whip-wide') * 0.55;
+    const volume = { a: _probeA, b: _probeB, radius: cfg.radius * widen * this.mods.areaScale };
 
     const interval = cfg.damageInterval ?? 0.12;
     let struck = 0;
@@ -1117,6 +1261,9 @@ export class AbilitySystem {
     const m = this.mods;
     const solution = this.aim(cfg.range);
     this.castOrigin(_origin);
+    // `mutate-mortar`: Stonefall lobs the boulder in a high arc that lands as
+    // a crater, trading a flat line for area and a much heavier impact.
+    const mortar = this.hasG('mutate-mortar');
 
     audio.play('rock');
     player.addShake(0.24, 7);
@@ -1137,18 +1284,26 @@ export class AbilitySystem {
       spread: 0.8, jitter: 2.2, color: 0xd9c08a, size: 0.28, life: 0.55, gravity: -2, drag: 1.4,
     });
 
+    // Stonefall throws the same boulder on a mortar arc: it climbs, falls
+    // heavily, and lands as a wide crater rather than punching a hole through.
+    const launch = new THREE.Vector3(
+      solution.direction.x, solution.direction.y, solution.direction.z,
+    );
+    if (mortar) launch.y += 0.42;
+    launch.normalize();
     projectiles.spawn({
       kind: 'rock', owner: 'player',
       origin: _origin.clone(),
-      direction: new THREE.Vector3(solution.direction.x, solution.direction.y, solution.direction.z),
-      speed: (cfg.speed ?? 27) * m.projectileSpeed,
-      damage: this.power(cfg.damage, 'earth'),
+      direction: launch,
+      speed: (cfg.speed ?? 27) * m.projectileSpeed * (mortar ? 0.85 : 1),
+      damage: this.power(cfg.damage * (mortar ? 0.8 : 1), 'earth'),
       radius: cfg.radius * m.projectileSize,
-      blast: (cfg.splash ?? 2) * m.projectileSize,
-      life: 3, gravity: 11,
-      knockback: cfg.knockback, stagger: cfg.stagger, color: 0x8b7d68,
+      blast: (cfg.splash ?? 2) * m.projectileSize * (mortar ? 2.2 : 1),
+      life: 3, gravity: mortar ? 20 : 11,
+      knockback: cfg.knockback * (mortar ? 1.3 : 1),
+      stagger: cfg.stagger * (mortar ? 1.4 : 1), color: 0x8b7d68,
       bounces: this.g('rock-bounce'),
-      fragments: this.g('rock-fragment'),
+      fragments: this.g('rock-fragment') + (mortar ? 2 : 0),
       element: 'earth',
     });
     this.ctx.debug?.({
@@ -1169,10 +1324,14 @@ export class AbilitySystem {
     const originX = player.position.x + flat.x * 3.4;
     const originZ = player.position.z + flat.z * 3.4;
     const tectonic = this.hasG('tectonic');
-    const duration = WALL_SECONDS * (tectonic ? 1.9 : 1);
+    // `deform-strength`: Terraformer raises a longer ridge and it stands for
+    // longer, which is what makes Earth's cover a real position rather than a
+    // moment of shelter.
+    const terraform = this.g('deform-strength');
+    const duration = WALL_SECONDS * (tectonic ? 1.9 : 1) * (1 + terraform * 0.45);
 
     let placed = 0;
-    const segments = 5;
+    const segments = 5 + terraform * 2;
     for (let s = 0; s < segments; s++) {
       const offset = (s - (segments - 1) / 2) * 1.5;
       const bx = originX + side.x * offset;
@@ -1218,6 +1377,24 @@ export class AbilitySystem {
     const armor = this.g('wall-armor');
     if (armor > 0) player.grantArmor(0.12 * armor, 6);
 
+    // `wall-explode`: the ridge is unstable, and blows apart when it crumbles.
+    const detonate = this.g('wall-explode');
+    if (detonate > 0) {
+      const centre = new THREE.Vector3(originX, world.groundHeight(originX, originZ), originZ);
+      this.later(WALL_SECONDS, () => {
+        for (const e of this.ctx.enemies.within(centre, 5 + detonate, _scratch2)) {
+          _kb.copy(e.center).sub(centre).setY(0.4).normalize()
+            .multiplyScalar(this.power(9, 'earth'));
+          this.damageEnemy(e, this.power(16 * detonate, 'earth'), 'earth', _kb, 0.6);
+        }
+        this.ctx.particles.debris({
+          count: 34, x: centre.x, y: centre.y + 1, z: centre.z, spread: 1.4, jitter: 8,
+          color: 0x8a6440, color2: 0xd9c08a, size: 0.3, life: 1.1, gravity: -13, drag: 0.6,
+        });
+        this.ctx.audio.play('impact', 40);
+      });
+    }
+
     player.unstick();
     return 'ok';
   }
@@ -1236,10 +1413,18 @@ export class AbilitySystem {
     player.addShake(0.08, 9);
     this.ctx.pulseLight(_origin.x, _origin.y, _origin.z, 0xff9b3d, 8, 0.16);
 
+    // `mutate-ember-rain`: Emberfall replaces the single burst with three
+    // embers that fall on the impact point.
+    const emberfall = this.hasG('mutate-ember-rain');
     const splits = this.g('split');
     const shots = splits > 0 ? 1 + splits * 2 : 1;
     const spread = splits > 0 ? 0.13 : 0;
     _dir.set(solution.direction.x, solution.direction.y, solution.direction.z);
+
+    // `blast-core`: every fire explosion is wider and carries more of its
+    // damage out to the edge.
+    const core = this.g('blast-core');
+    const blastScale = m.projectileSize * (1 + core * 0.22);
 
     for (let i = 0; i < shots; i++) {
       const offset = shots === 1 ? 0 : (i - (shots - 1) / 2) * spread;
@@ -1251,12 +1436,35 @@ export class AbilitySystem {
         speed: (cfg.speed ?? 36) * m.projectileSpeed,
         damage: this.power(cfg.damage, 'fire') / (shots === 1 ? 1 : shots * 0.62),
         radius: cfg.radius * m.projectileSize,
-        blast: (cfg.splash ?? 3.4) * m.projectileSize,
+        blast: (cfg.splash ?? 3.4) * blastScale,
         life: 2.6, gravity: 0, knockback: cfg.knockback,
         burn: this.power(STATUS_TUNING.burnDps, 'fire'),
         color: 0xffb04d,
         element: 'fire',
       });
+    }
+
+    // `mutate-ember-rain`: Emberfall drops three arcing embers onto the aimed
+    // point as well, so the ability covers ground instead of a single line.
+    if (emberfall) {
+      for (let i = 0; i < 3; i++) {
+        const a = (i / 3) * Math.PI * 2;
+        const dir = _dir.clone()
+          .applyAxisAngle(_up, Math.cos(a) * 0.22)
+          .add(new THREE.Vector3(0, 0.28 + Math.sin(a) * 0.1, 0))
+          .normalize();
+        projectiles.spawn({
+          kind: 'fireball', owner: 'player',
+          origin: _origin.clone(), direction: dir,
+          speed: (cfg.speed ?? 36) * 0.7 * m.projectileSpeed,
+          damage: this.power(cfg.damage * 0.42, 'fire'),
+          radius: cfg.radius * 0.8 * m.projectileSize,
+          blast: (cfg.splash ?? 3.4) * 0.8 * blastScale,
+          life: 2.4, gravity: -9, knockback: cfg.knockback * 0.6,
+          burn: this.power(STATUS_TUNING.burnDps * 0.7, 'fire'),
+          color: 0xffb04d, element: 'fire',
+        });
+      }
     }
 
     particles.spark({
@@ -1551,6 +1759,20 @@ export class AbilitySystem {
           );
         }
       }
+    }
+
+    // `ground-cracks`: Fissure leaves the torn ground dangerous for a while,
+    // so the slam denies the space as well as clearing it.
+    const cracks = this.g('ground-cracks');
+    if (cracks > 0) {
+      const gx = player.position.x + _fwd.x * 5;
+      const gz = player.position.z + _fwd.z * 5;
+      this.ctx.effects?.add(
+        'burning', gx, world.groundHeight(gx, gz), gz,
+        (3 + cracks) * this.mods.areaScale, 6,
+        this.power(4 * cracks, 'earth'), 'player',
+      );
+      decals.add('scorch', gx, world.groundHeight(gx, gz) + 0.02, gz, _up, 3 + cracks, 8, 0.5);
     }
 
     // Earth's terrain refund: reshaping the ground pays a little Mana back when

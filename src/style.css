@@ -1047,7 +1047,23 @@ input[type='checkbox']:checked::after { transform: translateX(22px); background:
   border: 1px solid var(--stroke); color: var(--text-faint);
 }
 .reward-tag.syn { border-color: var(--earth); color: var(--earth); }
+/* A synergy the card would start rather than complete: same colour, quieter. */
+.reward-tag.syn-soft { border-color: color-mix(in srgb, var(--earth) 45%, transparent); color: color-mix(in srgb, var(--earth) 72%, var(--text-faint)); }
 .reward-tag.own { border-color: var(--accent); color: var(--accent); }
+
+/* Requirements and exclusions: informational, never mistaken for a benefit. */
+.reward-conditions { list-style: none; margin: 0.15rem 0 0; padding: 0; display: grid; gap: 0.25rem; }
+.reward-conditions li {
+  font-size: 0.72rem; line-height: 1.4; color: var(--text-faint);
+  padding-left: 0.85rem; position: relative;
+}
+.reward-conditions li::before {
+  content: '·'; position: absolute; left: 0.2rem; color: var(--text-faint);
+}
+.reward-conditions li.excl { color: var(--fire); }
+.reward-conditions li.excl::before { content: '\00d7'; color: var(--fire); }
+.bp-caps { color: var(--fire); font-size: 0.74rem; margin-top: 0.35rem; }
+.bp-caps b { color: var(--fire); font-weight: 600; }
 .reward-synergies { color: var(--text-faint); font-size: 0.76rem; margin-bottom: 1rem; min-height: 1.2em; }
 .reward-synergies b { color: var(--earth); }
 
