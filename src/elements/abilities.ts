@@ -1038,7 +1038,6 @@ export class AbilitySystem {
         'ice', ground.point.x, ground.point.y, ground.point.z,
         cfg.radius * this.mods.areaScale, 12, 0, 'player',
       );
-      this.charge('terrain');
     }
     for (let i = 0; i < 40; i++) {
       const a = (i / 40) * Math.PI * 2;
@@ -1091,6 +1090,10 @@ export class AbilitySystem {
         }
       }
     }
+
+    // Freezing bare ground is scenery, not a terrain play: the meter only
+    // moves when the bloom caught something or bridged real water.
+    if (caught > 0 || froze) this.charge('terrain');
 
     // Freeze must never fail silently: say what happened either way.
     if (caught > 0) {
@@ -1348,7 +1351,7 @@ export class AbilitySystem {
       cfg.radius * 2.2 * this.mods.areaScale, zoneSeconds,
       this.power(STATUS_TUNING.burnDps * 0.7, 'fire'), 'player',
     );
-    this.charge('terrain');
+    if (struck > 0) this.charge('terrain');
   }
 
   // =====================================================================
@@ -1407,7 +1410,7 @@ export class AbilitySystem {
     const ground = world.groundHeight(_target.x, _target.z);
     this.ctx.effects?.add('wet', _target.x, ground, _target.z, radius, 10, 0, 'player');
     this.ctx.decals.add('wet', _target.x, ground + 0.02, _target.z, _up, radius, 9, 0.55);
-    this.charge('terrain');
+    if (pulled > 0) this.charge('terrain');
 
     this.ctx.toast(
       pulled > 0
@@ -1480,8 +1483,10 @@ export class AbilitySystem {
       );
       this.ctx.decals.add('scorch', x, ground + 0.02, z, _up, 2.4, 9, 0.7);
     }
-    this.charge('terrain');
-    if (struck > 0) audio.play('impact', 60);
+    if (struck > 0) {
+      this.charge('terrain');
+      audio.play('impact', 60);
+    }
   }
 
   /**
@@ -1550,8 +1555,10 @@ export class AbilitySystem {
 
     // Earth's terrain refund: reshaping the ground pays a little Mana back when
     // it actually connects with something.
-    if (struck.size > 0) this.ctx.refundMana?.(4 + struck.size * 2);
-    this.charge('terrain');
+    if (struck.size > 0) {
+      this.ctx.refundMana?.(4 + struck.size * 2);
+      this.charge('terrain');
+    }
     this.ctx.toast(
       struck.size > 0 ? `Seismic Slam staggered ${struck.size}` : 'The ground cracks',
       struck.size > 0 ? 'good' : 'plain' as 'good',
@@ -1854,7 +1861,7 @@ export class AbilitySystem {
     }
 
     player.unstick();
-    this.charge('terrain');
+    if (struck > 0) this.charge('terrain');
     this.ctx.toast(struck > 0 ? `Tectonic Rupture struck ${struck}` : 'The arena breaks open', 'good');
     return 'ok';
   }

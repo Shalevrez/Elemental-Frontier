@@ -13,7 +13,7 @@ export interface AbilityDef {
   readonly id: string;
   readonly name: string;
   readonly slot: AbilitySlotId;
-  /** Aether cost. Ultimates cost 0 aether - they spend the Ultimate meter. */
+  /** Mana cost. Ultimates cost 0 Mana - they spend the Ultimate meter. */
   readonly cost: number;
   /** Base cooldown in seconds (before cooldown upgrades). */
   readonly cooldown: number;
@@ -64,7 +64,7 @@ export const ELEMENTS: Readonly<Record<ElementId, ElementDef>> = Object.freeze({
       id: 'gust',
       name: 'Gust',
       slot: 'primary' as const,
-      cost: 12,
+      cost: 11,
       cooldown: 0.6,
       input: 'LMB',
       blurb: 'A wide cone of wind that hurls creatures back and swats slow projectiles out of the air.',
@@ -120,7 +120,7 @@ export const ELEMENTS: Readonly<Record<ElementId, ElementDef>> = Object.freeze({
       id: 'water-whip',
       name: 'Water Whip',
       slot: 'primary' as const,
-      cost: 14,
+      cost: 13,
       cooldown: 0.55,
       input: 'LMB',
       blurb: 'A curling lash of water that soaks, chills and slows whatever it touches. Stronger near open water.',
@@ -176,7 +176,7 @@ export const ELEMENTS: Readonly<Record<ElementId, ElementDef>> = Object.freeze({
       id: 'rock-shot',
       name: 'Rock Shot',
       slot: 'primary' as const,
-      cost: 18,
+      cost: 16,
       cooldown: 0.9,
       input: 'LMB',
       blurb: 'Rips a boulder from the ground and throws it. Slow, heavy, and it dents whatever it lands on.',
@@ -232,7 +232,7 @@ export const ELEMENTS: Readonly<Record<ElementId, ElementDef>> = Object.freeze({
       id: 'fireball',
       name: 'Fireball',
       slot: 'primary' as const,
-      cost: 16,
+      cost: 15,
       cooldown: 0.8,
       input: 'LMB',
       blurb: 'A fast ember that bursts on impact, scorches the ground and leaves its target burning.',

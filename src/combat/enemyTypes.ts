@@ -9,6 +9,8 @@
 
 import type { ElementId } from '../elements/affinity';
 import type { StatusId } from './status';
+import type { AttackCategory } from './CombatDirector';
+import { clampResistance, TOKENS } from './combatConfig';
 
 export type EnemyKind =
   | 'crawler'    // fast melee hunter (the original)
@@ -56,6 +58,14 @@ export type BodyPlan =
 /** What the creature is trying to do. */
 export type EnemyRole = 'melee' | 'ranged' | 'ambush' | 'support' | 'summon' | 'suicide' | 'tank' | 'boss';
 
+/**
+ * How long a creature is meant to survive, as a pacing band rather than a
+ * health number. `small` dies to a handful of accurate hits, `standard` to an
+ * effective combination, `heavy` takes a visible commitment, and `guardian`
+ * is paced by its phases instead of by its bar.
+ */
+export type EnemyTier = 'small' | 'standard' | 'heavy' | 'guardian';
+
 export interface EnemyAttackDef {
   readonly id: string;
   /** Seconds of visible wind-up before the hit lands. */
@@ -83,6 +93,8 @@ export interface EnemyTypeDef {
   readonly kind: EnemyKind;
   readonly name: string;
   readonly role: EnemyRole;
+  /** Pacing band this creature belongs to. Drives the durability targets. */
+  readonly tier: EnemyTier;
   readonly locomotion: Locomotion;
   readonly maxHealth: number;
   readonly speed: number;
@@ -126,7 +138,7 @@ const NEUTRAL: Readonly<Record<ElementId, number>> = Object.freeze({
 
 export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.freeze({
   crawler: ed({
-    kind: 'crawler', name: 'Corrupted Crawler', role: 'melee', locomotion: 'ground',
+    kind: 'crawler', name: 'Corrupted Crawler', role: 'melee', tier: 'small', locomotion: 'ground',
     maxHealth: 38, speed: 3.6, detectRange: 24, loseRange: 42,
     radius: 0.5, height: 1.0, knockbackResist: 0.25, energyDrop: 9, standoff: 0,
     attacks: [atk({
@@ -139,12 +151,12 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   wisp: ed({
-    kind: 'wisp', name: 'Corrupted Wisp', role: 'ranged', locomotion: 'hover',
-    maxHealth: 26, speed: 3.0, detectRange: 28, loseRange: 46,
+    kind: 'wisp', name: 'Corrupted Wisp', role: 'ranged', tier: 'small', locomotion: 'hover',
+    maxHealth: 30, speed: 3.0, detectRange: 28, loseRange: 46,
     radius: 0.5, height: 1.4, knockbackResist: 0.05, energyDrop: 12, standoff: 9,
     attacks: [atk({
       id: 'bolt', telegraph: 0.55, recovery: 0.3, range: 17, damage: 8,
-      cooldown: 2.3, shape: 'projectile', markerRadius: 0, knockback: 3.5, needsToken: false,
+      cooldown: 2.3, shape: 'projectile', markerRadius: 0, knockback: 3.5, needsToken: true,
     })],
     resistance: Object.freeze({ air: 1.35, water: 1.1, earth: 0.85, fire: 1.0 }),
     accent: 0xd08bff, body: 0x4a2769, threat: 1.2,
@@ -152,8 +164,8 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   brute: ed({
-    kind: 'brute', name: 'Blight Brute', role: 'tank', locomotion: 'ground',
-    maxHealth: 130, speed: 2.1, detectRange: 26, loseRange: 48,
+    kind: 'brute', name: 'Blight Brute', role: 'tank', tier: 'heavy', locomotion: 'ground',
+    maxHealth: 118, speed: 2.1, detectRange: 26, loseRange: 48,
     radius: 0.85, height: 2.2, knockbackResist: 0.75, energyDrop: 24, standoff: 0,
     attacks: [
       atk({
@@ -171,12 +183,12 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   slinger: ed({
-    kind: 'slinger', name: 'Blight Slinger', role: 'ranged', locomotion: 'ground',
-    maxHealth: 42, speed: 3.2, detectRange: 30, loseRange: 50,
+    kind: 'slinger', name: 'Blight Slinger', role: 'ranged', tier: 'standard', locomotion: 'ground',
+    maxHealth: 52, speed: 3.2, detectRange: 30, loseRange: 50,
     radius: 0.5, height: 1.6, knockbackResist: 0.15, energyDrop: 14, standoff: 13,
     attacks: [atk({
       id: 'lob', telegraph: 0.75, recovery: 0.4, range: 22, damage: 12,
-      cooldown: 2.8, shape: 'projectile', markerRadius: 2.4, knockback: 4, needsToken: false,
+      cooldown: 2.8, shape: 'projectile', markerRadius: 2.4, knockback: 4, needsToken: true,
       applies: { status: 'corrupted', seconds: 4 },
     })],
     resistance: Object.freeze({ air: 1.2, water: 1.0, earth: 1.0, fire: 1.05 }),
@@ -185,8 +197,8 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   burrower: ed({
-    kind: 'burrower', name: 'Rift Burrower', role: 'ambush', locomotion: 'burrow',
-    maxHealth: 54, speed: 5.2, detectRange: 30, loseRange: 55,
+    kind: 'burrower', name: 'Rift Burrower', role: 'ambush', tier: 'standard', locomotion: 'burrow',
+    maxHealth: 62, speed: 5.2, detectRange: 30, loseRange: 55,
     radius: 0.6, height: 1.2, knockbackResist: 0.35, energyDrop: 18, standoff: 0,
     attacks: [atk({
       id: 'erupt', telegraph: 1.05, recovery: 0.8, range: 2.6, damage: 18,
@@ -198,7 +210,7 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   warden: ed({
-    kind: 'warden', name: 'Blight Warden', role: 'summon', locomotion: 'ground',
+    kind: 'warden', name: 'Blight Warden', role: 'summon', tier: 'standard', locomotion: 'ground',
     maxHealth: 70, speed: 2.4, detectRange: 32, loseRange: 55,
     radius: 0.6, height: 2.0, knockbackResist: 0.2, energyDrop: 26, standoff: 16,
     attacks: [atk({
@@ -211,8 +223,8 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   mender: ed({
-    kind: 'mender', name: 'Blight Mender', role: 'support', locomotion: 'hover',
-    maxHealth: 48, speed: 3.4, detectRange: 30, loseRange: 52,
+    kind: 'mender', name: 'Blight Mender', role: 'support', tier: 'standard', locomotion: 'hover',
+    maxHealth: 56, speed: 3.4, detectRange: 30, loseRange: 52,
     radius: 0.5, height: 1.5, knockbackResist: 0.1, energyDrop: 22, standoff: 11,
     attacks: [atk({
       id: 'mend', telegraph: 0.9, recovery: 0.5, range: 14, damage: 0,
@@ -224,12 +236,12 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   sapper: ed({
-    kind: 'sapper', name: 'Rift Sapper', role: 'suicide', locomotion: 'ground',
+    kind: 'sapper', name: 'Rift Sapper', role: 'suicide', tier: 'small', locomotion: 'ground',
     maxHealth: 30, speed: 4.6, detectRange: 26, loseRange: 46,
     radius: 0.55, height: 1.1, knockbackResist: 0.1, energyDrop: 16, standoff: 0,
     attacks: [atk({
       id: 'detonate', telegraph: 1.15, recovery: 0, range: 3.4, damage: 30,
-      cooldown: 99, shape: 'area', markerRadius: 4.2, knockback: 14, needsToken: false,
+      cooldown: 99, shape: 'area', markerRadius: 4.2, knockback: 14, needsToken: true,
     })],
     resistance: Object.freeze({ air: 1.2, water: 1.0, earth: 1.0, fire: 1.3 }),
     accent: 0xff6b3a, body: 0x5a2418, threat: 2,
@@ -237,8 +249,8 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   bulwark: ed({
-    kind: 'bulwark', name: 'Blight Bulwark', role: 'tank', locomotion: 'ground',
-    maxHealth: 95, speed: 2.6, detectRange: 26, loseRange: 46,
+    kind: 'bulwark', name: 'Blight Bulwark', role: 'tank', tier: 'heavy', locomotion: 'ground',
+    maxHealth: 100, speed: 2.6, detectRange: 26, loseRange: 46,
     radius: 0.7, height: 2.0, knockbackResist: 0.6, energyDrop: 22, standoff: 0,
     attacks: [atk({
       id: 'shieldbash', telegraph: 0.7, recovery: 0.55, range: 2.8, damage: 15,
@@ -255,8 +267,8 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   // ===================================================================
 
   'root-hunter': ed({
-    kind: 'root-hunter', name: 'Root-Bound Hunter', role: 'melee', locomotion: 'ground',
-    maxHealth: 62, speed: 4.4, detectRange: 28, loseRange: 48,
+    kind: 'root-hunter', name: 'Root-Bound Hunter', role: 'melee', tier: 'standard', locomotion: 'ground',
+    maxHealth: 70, speed: 4.4, detectRange: 28, loseRange: 48,
     radius: 0.55, height: 1.9, knockbackResist: 0.2, energyDrop: 14, standoff: 0,
     attacks: [
       atk({
@@ -276,8 +288,8 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   'stone-beast': ed({
-    kind: 'stone-beast', name: 'Corrupted Stone Beast', role: 'tank', locomotion: 'ground',
-    maxHealth: 150, speed: 2.2, detectRange: 26, loseRange: 46,
+    kind: 'stone-beast', name: 'Corrupted Stone Beast', role: 'tank', tier: 'heavy', locomotion: 'ground',
+    maxHealth: 132, speed: 2.2, detectRange: 26, loseRange: 46,
     radius: 0.9, height: 1.7, knockbackResist: 0.82, energyDrop: 26, standoff: 0,
     attacks: [
       atk({
@@ -297,12 +309,12 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   'thorn-spitter': ed({
-    kind: 'thorn-spitter', name: 'Thorn Spitter', role: 'ranged', locomotion: 'ground',
+    kind: 'thorn-spitter', name: 'Thorn Spitter', role: 'ranged', tier: 'small', locomotion: 'ground',
     maxHealth: 46, speed: 0, detectRange: 30, loseRange: 60,
     radius: 0.55, height: 1.9, knockbackResist: 1, energyDrop: 12, standoff: 30,
     attacks: [atk({
       id: 'thorn-volley', telegraph: 0.85, recovery: 0.45, range: 26, damage: 11,
-      cooldown: 2.6, shape: 'projectile', markerRadius: 1.8, knockback: 3, needsToken: false,
+      cooldown: 2.6, shape: 'projectile', markerRadius: 1.8, knockback: 3, needsToken: true,
     })],
     resistance: Object.freeze({ air: 1.2, water: 0.85, earth: 1.0, fire: 1.6 }),
     accent: 0x9be36b, body: 0x2f5c33, threat: 1.4,
@@ -315,8 +327,8 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   // ===================================================================
 
   shellback: ed({
-    kind: 'shellback', name: 'Shell-Armoured Crawler', role: 'tank', locomotion: 'ground',
-    maxHealth: 110, speed: 2.8, detectRange: 24, loseRange: 44,
+    kind: 'shellback', name: 'Shell-Armoured Crawler', role: 'tank', tier: 'heavy', locomotion: 'ground',
+    maxHealth: 100, speed: 2.8, detectRange: 24, loseRange: 44,
     radius: 0.75, height: 1.2, knockbackResist: 0.7, energyDrop: 20, standoff: 0,
     attacks: [atk({
       id: 'shell-slam', telegraph: 0.75, recovery: 0.6, range: 2.8, damage: 16,
@@ -329,12 +341,12 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   'tide-spirit': ed({
-    kind: 'tide-spirit', name: 'Tide Spirit', role: 'ranged', locomotion: 'hover',
-    maxHealth: 38, speed: 3.4, detectRange: 30, loseRange: 50,
+    kind: 'tide-spirit', name: 'Tide Spirit', role: 'ranged', tier: 'small', locomotion: 'hover',
+    maxHealth: 42, speed: 3.4, detectRange: 30, loseRange: 50,
     radius: 0.5, height: 1.6, knockbackResist: 0.05, energyDrop: 16, standoff: 10,
     attacks: [atk({
       id: 'brine-bolt', telegraph: 0.6, recovery: 0.35, range: 19, damage: 10,
-      cooldown: 2.2, shape: 'projectile', markerRadius: 0, knockback: 4, needsToken: false,
+      cooldown: 2.2, shape: 'projectile', markerRadius: 0, knockback: 4, needsToken: true,
       applies: { status: 'wet', seconds: 5 },
     })],
     resistance: Object.freeze({ air: 1.3, water: 0.6, earth: 1.05, fire: 1.35 }),
@@ -344,8 +356,8 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   'silt-lurker': ed({
-    kind: 'silt-lurker', name: 'Silt Lurker', role: 'ambush', locomotion: 'burrow',
-    maxHealth: 58, speed: 5.0, detectRange: 28, loseRange: 52,
+    kind: 'silt-lurker', name: 'Silt Lurker', role: 'ambush', tier: 'standard', locomotion: 'burrow',
+    maxHealth: 64, speed: 5.0, detectRange: 28, loseRange: 52,
     radius: 0.6, height: 1.2, knockbackResist: 0.3, energyDrop: 18, standoff: 0,
     attacks: [atk({
       id: 'surge', telegraph: 1.0, recovery: 0.75, range: 2.8, damage: 17,
@@ -364,8 +376,8 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   // ===================================================================
 
   'magma-beast': ed({
-    kind: 'magma-beast', name: 'Magma Beast', role: 'melee', locomotion: 'ground',
-    maxHealth: 96, speed: 3.2, detectRange: 26, loseRange: 46,
+    kind: 'magma-beast', name: 'Magma Beast', role: 'melee', tier: 'standard', locomotion: 'ground',
+    maxHealth: 92, speed: 3.2, detectRange: 26, loseRange: 46,
     radius: 0.8, height: 1.6, knockbackResist: 0.55, energyDrop: 22, standoff: 0,
     attacks: [atk({
       id: 'molten-swipe', telegraph: 0.65, recovery: 0.5, range: 3.2, damage: 18,
@@ -380,8 +392,8 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   'obsidian-clad': ed({
-    kind: 'obsidian-clad', name: 'Obsidian-Clad', role: 'tank', locomotion: 'ground',
-    maxHealth: 165, speed: 2.0, detectRange: 24, loseRange: 44,
+    kind: 'obsidian-clad', name: 'Obsidian-Clad', role: 'tank', tier: 'heavy', locomotion: 'ground',
+    maxHealth: 140, speed: 2.0, detectRange: 24, loseRange: 44,
     radius: 0.85, height: 2.1, knockbackResist: 0.85, energyDrop: 28, standoff: 0,
     attacks: [atk({
       id: 'glass-cleave', telegraph: 0.95, recovery: 0.8, range: 3.6, damage: 26,
@@ -395,12 +407,12 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   'ember-burst': ed({
-    kind: 'ember-burst', name: 'Ember Burst', role: 'suicide', locomotion: 'ground',
+    kind: 'ember-burst', name: 'Ember Burst', role: 'suicide', tier: 'small', locomotion: 'ground',
     maxHealth: 34, speed: 5.0, detectRange: 28, loseRange: 48,
     radius: 0.5, height: 1.0, knockbackResist: 0.08, energyDrop: 15, standoff: 0,
     attacks: [atk({
       id: 'detonate', telegraph: 1.1, recovery: 0, range: 3.6, damage: 28,
-      cooldown: 99, shape: 'area', markerRadius: 4.4, knockback: 13, needsToken: false,
+      cooldown: 99, shape: 'area', markerRadius: 4.4, knockback: 13, needsToken: true,
       applies: { status: 'burning', seconds: 4, magnitude: 6 },
     })],
     resistance: Object.freeze({ air: 1.35, water: 1.5, earth: 1.0, fire: 0.4 }),
@@ -415,8 +427,8 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   // ===================================================================
 
   'rime-stalker': ed({
-    kind: 'rime-stalker', name: 'Rime Stalker', role: 'melee', locomotion: 'ground',
-    maxHealth: 66, speed: 5.0, detectRange: 30, loseRange: 52,
+    kind: 'rime-stalker', name: 'Rime Stalker', role: 'melee', tier: 'standard', locomotion: 'ground',
+    maxHealth: 72, speed: 5.0, detectRange: 30, loseRange: 52,
     radius: 0.55, height: 1.5, knockbackResist: 0.2, energyDrop: 16, standoff: 0,
     attacks: [atk({
       id: 'rake', telegraph: 0.42, recovery: 0.35, range: 2.6, damage: 14,
@@ -430,12 +442,12 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   'frost-flier': ed({
-    kind: 'frost-flier', name: 'Frost Flier', role: 'ranged', locomotion: 'hover',
-    maxHealth: 34, speed: 4.2, detectRange: 32, loseRange: 54,
+    kind: 'frost-flier', name: 'Frost Flier', role: 'ranged', tier: 'small', locomotion: 'hover',
+    maxHealth: 38, speed: 4.2, detectRange: 32, loseRange: 54,
     radius: 0.5, height: 1.5, knockbackResist: 0.05, energyDrop: 15, standoff: 12,
     attacks: [atk({
       id: 'shard', telegraph: 0.55, recovery: 0.3, range: 20, damage: 9,
-      cooldown: 2.0, shape: 'projectile', markerRadius: 0, knockback: 3, needsToken: false,
+      cooldown: 2.0, shape: 'projectile', markerRadius: 0, knockback: 3, needsToken: true,
       applies: { status: 'frozen', seconds: 2 },
     })],
     resistance: Object.freeze({ air: 1.4, water: 0.6, earth: 0.9, fire: 1.5 }),
@@ -445,8 +457,8 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   'crystal-clad': ed({
-    kind: 'crystal-clad', name: 'Crystal-Clad', role: 'tank', locomotion: 'ground',
-    maxHealth: 140, speed: 2.3, detectRange: 26, loseRange: 46,
+    kind: 'crystal-clad', name: 'Crystal-Clad', role: 'tank', tier: 'heavy', locomotion: 'ground',
+    maxHealth: 126, speed: 2.3, detectRange: 26, loseRange: 46,
     radius: 0.8, height: 2.0, knockbackResist: 0.78, energyDrop: 26, standoff: 0,
     attacks: [atk({
       id: 'glacial-slam', telegraph: 1.0, recovery: 0.8, range: 3.4, damage: 22,
@@ -461,7 +473,7 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   guardian: ed({
-    kind: 'guardian', name: 'Shrine Guardian', role: 'boss', locomotion: 'ground',
+    kind: 'guardian', name: 'Shrine Guardian', role: 'boss', tier: 'guardian', locomotion: 'ground',
     maxHealth: 460, speed: 2.8, detectRange: 34, loseRange: 70,
     radius: 1.1, height: 4.0, knockbackResist: 0.9, energyDrop: 60, standoff: 0,
     attacks: [
@@ -484,8 +496,8 @@ export const ENEMY_TYPES: Readonly<Record<EnemyKind, EnemyTypeDef>> = Object.fre
   }),
 
   'boss-maw': ed({
-    kind: 'boss-maw', name: 'The Sundering Maw', role: 'boss', locomotion: 'ground',
-    maxHealth: 1500, speed: 2.9, detectRange: 55, loseRange: 200,
+    kind: 'boss-maw', name: 'The Sundering Maw', role: 'boss', tier: 'guardian', locomotion: 'ground',
+    maxHealth: 1300, speed: 2.9, detectRange: 55, loseRange: 200,
     radius: 1.8, height: 5.2, knockbackResist: 0.95, energyDrop: 200, standoff: 0,
     attacks: [
       atk({
@@ -514,6 +526,41 @@ export const ENEMY_KINDS: readonly EnemyKind[] = Object.freeze(
 
 export function enemyType(kind: EnemyKind): EnemyTypeDef {
   return ENEMY_TYPES[kind];
+}
+
+/**
+ * The damage multiplier an element actually gets against a creature.
+ *
+ * The authored table still says what the creature is made of; this is what the
+ * game charges, clamped so that no mandatory enemy can shrug off an entire
+ * element. Applying the clamp here rather than editing twenty-three tables
+ * means the guarantee cannot be broken by a later tuning pass.
+ */
+export function effectiveResistance(kind: EnemyKind, element: ElementId): number {
+  return clampResistance(ENEMY_TYPES[kind].resistance[element]);
+}
+
+/**
+ * Which pressure category an enemy attack applies, or null when it should not
+ * draw on the shared fairness budget at all.
+ *
+ * Support actions - a Warden's summon, a Mender's stitch - never crowd the
+ * player, and bosses own their arena outright rather than queueing behind the
+ * creatures they brought with them.
+ */
+export function attackCategoryOf(
+  attack: EnemyAttackDef,
+  role: EnemyRole,
+): AttackCategory | null {
+  if (!attack.needsToken) return null;
+  if (attack.damage <= 0) return null;
+  if (role === 'boss') return null;
+  if (attack.shape === 'projectile') return 'ranged';
+  if ((attack.shape === 'area' || attack.shape === 'cone')
+      && attack.markerRadius >= TOKENS.heavyMarkerRadius) {
+    return 'heavy';
+  }
+  return 'melee';
 }
 
 // =====================================================================
@@ -549,7 +596,7 @@ export const ELITE_MODIFIERS: Readonly<Record<EliteId, EliteDef>> = Object.freez
   armored: el({
     id: 'armored', name: 'Armored', color: 0x9aa6bb,
     description: 'Plated hide: takes far less damage until the plates are broken.',
-    healthScale: 1.5, speedScale: 0.9, damageScale: 1, rewardBonus: 1,
+    healthScale: 1.35, speedScale: 0.9, damageScale: 1, rewardBonus: 1,
     conflicts: ['shielded'],
   }),
   swift: el({
@@ -573,7 +620,7 @@ export const ELITE_MODIFIERS: Readonly<Record<EliteId, EliteDef>> = Object.freez
   splitting: el({
     id: 'splitting', name: 'Splitting', color: 0xb6ff6b,
     description: 'Breaks into two smaller copies when it falls.',
-    healthScale: 1.3, speedScale: 0.95, damageScale: 0.9, rewardBonus: 1.5,
+    healthScale: 1.2, speedScale: 0.95, damageScale: 0.9, rewardBonus: 1.5,
     forbidRoles: ['boss', 'suicide', 'summon'],
     conflicts: ['volatile'],
   }),
@@ -651,10 +698,12 @@ export function eliteStats(ids: readonly EliteId[]): EliteStats {
     out.damageScale *= def.damageScale;
     out.rewardBonus *= def.rewardBonus;
   }
-  // Hard ceilings so an unlucky roll can never produce something absurd.
-  out.healthScale = Math.min(2.6, out.healthScale);
+  // Hard ceilings so an unlucky roll can never produce something absurd. An
+  // elite is meant to be a harder fight, not the same fight with a longer bar,
+  // so the health ceiling is deliberately tighter than the reward it pays.
+  out.healthScale = Math.min(1.9, out.healthScale);
   out.speedScale = Math.min(1.7, out.speedScale);
-  out.damageScale = Math.min(1.5, out.damageScale);
+  out.damageScale = Math.min(1.35, out.damageScale);
   return out;
 }
 

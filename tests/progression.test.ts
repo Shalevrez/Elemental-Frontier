@@ -13,7 +13,10 @@ import {
   ELITE_MODIFIERS, ELITE_IDS, ENEMY_TYPES, ENEMY_KINDS,
   eliteAllowed, eliteName, eliteStats, rollElites,
 } from '../src/combat/enemyTypes';
-import { CombatDirector, isFairSpawn, relativeBearing } from '../src/combat/CombatDirector';
+import {
+  CombatDirector, isFairSpawn, relativeBearing, tokenBudgetForDepth,
+} from '../src/combat/CombatDirector';
+import { TOKENS } from '../src/combat/combatConfig';
 import {
   STATUSES, StatusSet, durationModifier, resolveReaction,
 } from '../src/combat/status';
@@ -400,34 +403,83 @@ describe('elite modifiers', () => {
 });
 
 describe('combat director', () => {
-  it('limits how many creatures attack at once', () => {
+  it('limits how much attack weight is committed at once', () => {
     const d = new CombatDirector({ maxTokens: 2, globalCooldown: 0 });
-    expect(d.request(1, 0.5, true, true).granted).toBe(true);
-    expect(d.request(2, 0.5, true, true).granted).toBe(true);
-    const third = d.request(3, 0.5, true, true);
+    expect(d.request(1, 0.5, true, 'melee').granted).toBe(true);
+    expect(d.request(2, 0.5, true, 'melee').granted).toBe(true);
+    const third = d.request(3, 0.5, true, 'melee');
     expect(third.granted).toBe(false);
     expect(third.reason).toBe('no-token');
   });
 
-  it('frees a token when the attacker finishes', () => {
-    const d = new CombatDirector({ maxTokens: 1, globalCooldown: 0 });
-    const first = d.request(1, 0.5, true, true);
-    expect(first.granted).toBe(true);
-    expect(d.request(2, 0.5, true, true).granted).toBe(false);
-    d.release(first.token);
-    expect(d.request(2, 0.5, true, true).granted).toBe(true);
+  it('charges a heavy area attack double, so it crowds out a second swing', () => {
+    const d = new CombatDirector({ maxTokens: 2, globalCooldown: 0 });
+    expect(d.request(1, 0.9, true, 'heavy').granted).toBe(true);
+    expect(d.activeAttackers).toBe(2);
+    expect(d.request(2, 0.5, true, 'melee').granted).toBe(false);
   });
 
-  it('does not consume tokens for ranged pot-shots', () => {
+  it('frees a token when the attacker finishes', () => {
     const d = new CombatDirector({ maxTokens: 1, globalCooldown: 0 });
-    d.request(1, 0.5, true, true);
-    expect(d.request(2, 0.5, true, false).granted).toBe(true);
+    const first = d.request(1, 0.5, true, 'melee');
+    expect(first.granted).toBe(true);
+    expect(d.request(2, 0.5, true, 'melee').granted).toBe(false);
+    d.release(first.token);
+    expect(d.request(2, 0.5, true, 'melee').granted).toBe(true);
+  });
+
+  it('caps how many creatures may fire at once', () => {
+    const d = new CombatDirector({ maxTokens: 4, maxRanged: 1, globalCooldown: 0 });
+    expect(d.request(1, 0.5, true, 'ranged').granted).toBe(true);
+    const second = d.request(2, 0.5, true, 'ranged');
+    expect(second.granted).toBe(false);
+    expect(second.reason).toBe('ranged-full');
+  });
+
+  it('never commits two large area attacks at the same time', () => {
+    const d = new CombatDirector({ maxTokens: 6, maxArea: 1, globalCooldown: 0 });
+    expect(d.request(1, 0.9, true, 'heavy').granted).toBe(true);
+    const second = d.request(2, 0.9, true, 'heavy');
+    expect(second.granted).toBe(false);
+    expect(second.reason).toBe('area-busy');
+  });
+
+  it('refuses an off-screen shot while a heavy attack is already committed', () => {
+    const d = new CombatDirector({ maxTokens: 6, maxRanged: 2, globalCooldown: 0 });
+    expect(d.request(1, 0.9, true, 'heavy').granted).toBe(true);
+    const sneaky = d.request(2, 0.5, false, 'ranged');
+    expect(sneaky.granted).toBe(false);
+    expect(sneaky.reason).toBe('unfair-combo');
+  });
+
+  it('only ever lets one attack come from outside the view', () => {
+    const d = new CombatDirector({ maxTokens: 6, maxRanged: 3, globalCooldown: 0 });
+    expect(d.request(1, 0.5, false, 'melee').granted).toBe(true);
+    const second = d.request(2, 0.5, false, 'melee');
+    expect(second.granted).toBe(false);
+    expect(second.reason).toBe('unfair-combo');
+  });
+
+  it('lets support actions through without spending the budget', () => {
+    const d = new CombatDirector({ maxTokens: 1, globalCooldown: 0 });
+    d.request(1, 0.5, true, 'melee');
+    expect(d.requestUncontested(0.5, true).granted).toBe(true);
+    expect(d.activeAttackers).toBe(1);
+  });
+
+  it('raises the budget with run depth, but only in steps', () => {
+    expect(tokenBudgetForDepth(0)).toBe(TOKENS.earlyBudget);
+    expect(tokenBudgetForDepth(TOKENS.midDepth)).toBe(TOKENS.midBudget);
+    expect(tokenBudgetForDepth(TOKENS.lateDepth)).toBe(TOKENS.lateBudget);
+    // Early encounters never present more than two dangerous attackers.
+    expect(TOKENS.earlyBudget).toBeLessThanOrEqual(2);
+    expect(TOKENS.lateBudget).toBeLessThanOrEqual(4);
   });
 
   it('stretches the telegraph for attacks from behind and flags a warning', () => {
     const d = new CombatDirector({ globalCooldown: 0 });
-    const front = d.request(1, 0.42, true, false);
-    const behind = d.request(2, 0.42, false, false);
+    const front = d.requestUncontested(0.42, true);
+    const behind = d.requestUncontested(0.42, false);
     expect(behind.telegraph).toBeGreaterThan(front.telegraph);
     expect(behind.telegraph).toBeGreaterThanOrEqual(0.85);
     expect(behind.needsWarning).toBe(true);
@@ -436,17 +488,17 @@ describe('combat director', () => {
 
   it('enforces a minimum reaction window even for fast attacks', () => {
     const d = new CombatDirector({ globalCooldown: 0 });
-    expect(d.request(1, 0.05, true, false).telegraph).toBeGreaterThanOrEqual(0.35);
+    expect(d.requestUncontested(0.05, true).telegraph).toBeGreaterThanOrEqual(0.35);
   });
 
   it('spaces out hits landing on the player', () => {
     const d = new CombatDirector({ globalCooldown: 0.6, maxTokens: 4 });
     d.notifyLanded();
-    const denied = d.request(1, 0.5, true, false);
+    const denied = d.requestUncontested(0.5, true);
     expect(denied.granted).toBe(false);
     expect(denied.reason).toBe('too-soon');
     d.update(0.7);
-    expect(d.request(1, 0.5, true, false).granted).toBe(true);
+    expect(d.requestUncontested(0.5, true).granted).toBe(true);
   });
 
   it('never allows a close spawn behind the player', () => {
@@ -455,7 +507,7 @@ describe('combat director', () => {
     // Straight behind, far: allowed.
     expect(isFairSpawn(0, 1, 0, -1, 30)).toBe(true);
     // In front at a moderate distance: allowed.
-    expect(isFairSpawn(0, -1, 0, -1, 16)).toBe(true);
+    expect(isFairSpawn(0, -1, 0, -1, 18)).toBe(true);
   });
 
   it('computes the bearing of an incoming hit', () => {

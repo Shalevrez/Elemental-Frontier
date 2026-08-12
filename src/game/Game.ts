@@ -56,12 +56,12 @@ import { resolveRespawn, type RespawnProbe, type RespawnResult } from '../player
 import { TerrainEffects } from '../world/deformation';
 import {
   addCharge, consumeUltimate, createUltimateState, isUltimateReady, registerComboHit,
-  sanitiseCharge, tickUltimate, ultimateDenial, ultimateFraction,
+  sanitiseCharge, setUltimateActive, tickUltimate, ultimateDenial, ultimateFraction,
   type ChargeSource, type UltimateState,
 } from '../progression/ultimate';
 import {
-  absorbPickup, createManaState, isFreeCast, manaFeedback, notifyCast, notifyCombat,
-  onAffinityTerrain, resolvePrimaryCost, tickMana, type ManaState,
+  absorbPickup, allowRefund, createManaState, isFreeCast, manaFeedback, notifyCast,
+  notifyCombat, onAffinityTerrain, resolvePrimaryCost, tickMana, type ManaState,
 } from '../progression/mana';
 import { BuffTracker, combineModifiers } from '../progression/buffs';
 import { CHEST_BUFFS, chestRarityLabel, rollChestOutcome, type ChestOutcome } from '../progression/chests';
@@ -91,6 +91,26 @@ const ELEMENT_SWITCH_COOLDOWN = 1.2;
 const CLEANSE_DURATION = 1.9;
 const AUTOSAVE_INTERVAL = 20;
 const DAY_LENGTH = 720;
+/**
+ * Seconds after firing an Ultimate during which nothing charges the meter.
+ *
+ * Sustained Ultimates hold the suppression flag up for as long as their field
+ * runs; the instant ones (Tectonic Rupture) need this window instead, so no
+ * Ultimate can ever pay for the next one.
+ */
+const ULTIMATE_ECHO = 1.5;
+/**
+ * Quiet seconds granted when control returns from a screen.
+ *
+ * Story beats, reward cards, chests and world transitions all take the screen
+ * away from the player. Handing it back straight into an ambush is the same
+ * mistake as spawning something behind them, so the world holds its breath.
+ */
+const RETURN_TO_PLAY_GRACE = 4;
+/** Quiet seconds after arriving in a world, so nothing greets the player. */
+const WORLD_ARRIVAL_GRACE = 12;
+/** Quiet seconds after respawning, deliberately longer than the invulnerability. */
+const RESPAWN_GRACE = 10;
 /** Terrain strokes per second while the dig button is held. */
 const BRUSH_RATE = 9;
 
@@ -159,6 +179,9 @@ export class Game {
   private manaFeedback: ReturnType<typeof manaFeedback> = 'normal';
   /** True while the element's terrain is boosting Mana regeneration. */
   private manaTerrainBonus = false;
+
+  /** Seconds left of the post-Ultimate charge suppression window. */
+  private ultimateEcho = 0;
 
   /** Short freeze applied on weighty impacts. */
   private hitStopTimer = 0;
@@ -249,7 +272,19 @@ export class Game {
         this.telegraphs.add(x, y, z, radius, seconds, color),
       offscreenWarning: (fromX, fromZ) => this.showDamageDirection(fromX, fromZ, true),
       onEnemyKilled: (kind, elites) => this.onEnemyKilled(kind, elites),
-      difficulty: () => this.run.difficulty,
+      // Enemy *damage* runs on its own flatter curve; enemy health uses
+      // `run.difficulty` through `setDifficulty`.
+      difficulty: () => this.run.damageDifficulty,
+      // ---- pacing inputs. These are what stop a fight from opening on top of
+      // a story beat, a reward screen, a respawn or a nearly-dead player.
+      playerHealthFraction: () =>
+        (this.player.maxHealth > 0 ? this.player.health / this.player.maxHealth : 1),
+      playerMaxHealth: () => this.player.maxHealth,
+      isPlaying: () => this.state === 'playing',
+      isProtected: () => this.player.respawnProtection > 0,
+      scenarioDriven: () => this.run.scenario?.phase === 'active',
+      isObstacle: (x, y, z, radius, height) =>
+        this.player.obstacles?.overlaps(x, y, z, radius, height) ?? false,
     });
 
     this.shrines = new ShrineManager(this.world, this.particles);
@@ -270,7 +305,7 @@ export class Game {
       effects: this.effects,
       charge: (source, magnitude) => this.addUltimateCharge(source, magnitude),
       comboHit: () => registerComboHit(this.ultimate),
-      refundMana: (amount) => this.grantMana(amount),
+      refundMana: (amount) => this.refundMana(amount),
       affinityBonus: () => this.run.affinityBonus,
       flash: (color, strength) => this.ui.elementFlash(color, strength),
       hitMarker: (crit) => this.ui.hitMarker(crit),
@@ -694,6 +729,10 @@ export class Game {
   }
 
   private enterPlay(): void {
+    // Arriving in a world - a new run, a load, or a step through a portal -
+    // always begins in exploration, never mid-encounter.
+    this.enemies.encounter.reset();
+    this.enemies.holdSpawning(WORLD_ARRIVAL_GRACE);
     this.setState('playing');
     this.ui.applyTheme(this.affinity, this.activeElement);
     this.persist();
@@ -1200,7 +1239,7 @@ export class Game {
       if (resolved) {
         cost = resolved.cost;
         power = resolved.power;
-        if (resolved.weakened) this.ui.toast('Low aether — weakened cast', 'warn', 1);
+        if (resolved.weakened) this.ui.toast('Low Mana — weakened cast', 'warn', 1);
       }
     } else if (isFreeCast(this.manaState)) {
       cost = 0;
@@ -1223,7 +1262,7 @@ export class Game {
     window.setTimeout(() => node?.classList.remove('deny'), 340);
     this.audio.play('deny', 140);
     if (result === 'energy') {
-      this.ui.toast(`Not enough aether — needs ${Math.round(fullCost)}`, 'warn', 1.4);
+      this.ui.toast(`Not enough Mana — needs ${Math.round(fullCost)}`, 'warn', 1.4);
     } else if (result === 'cooldown') {
       const left = this.abilities.remaining(this.activeElement, slot);
       this.ui.toast(`Still gathering — ${left.toFixed(1)}s`, 'warn', 1);
@@ -1480,6 +1519,11 @@ export class Game {
 
     // ---- ultimate meter
     tickUltimate(this.ultimate, dt);
+    // While the player's own Ultimate is resolving, nothing it does feeds the
+    // next one. Instant Ultimates get a short window of their own, since they
+    // have no field to keep the flag raised.
+    if (this.ultimateEcho > 0) this.ultimateEcho = Math.max(0, this.ultimateEcho - dt);
+    setUltimateActive(this.ultimate, this.abilities.ultimateActive || this.ultimateEcho > 0);
     if (this.ultimate.justReady) this.announceUltimateReady();
 
     // ---- mana
@@ -1902,6 +1946,8 @@ export class Game {
   // ------------------------------------------------------------- combat
 
   private damagePlayer(amount: number, from: THREE.Vector3, knockback: number): void {
+    // No hit lands while a story beat, a reward screen or a transition owns
+    // the screen: the player has no control to answer it with.
     if (this.state !== 'playing') return;
     const dealt = this.player.applyDamage(amount, from, knockback);
     if (dealt <= 0) return;
@@ -2198,6 +2244,19 @@ export class Game {
     this.player.addEnergy(result.mana);
   }
 
+  /**
+   * Return Mana from an ability refund, on-hit or on-kill effect.
+   *
+   * Metered, unlike a pickup: a refund that fires once per target per tick of a
+   * multi-hit ability would otherwise be an infinite pool. Pickups the player
+   * physically walks over are not throttled - they are already limited by how
+   * many creatures dropped them.
+   */
+  private refundMana(amount: number): void {
+    const allowed = allowRefund(this.manaState, amount, this.player.maxEnergy);
+    if (allowed > 0) this.grantMana(allowed);
+  }
+
   /** Fire the current element's Ultimate, if the meter allows it. */
   private fireUltimate(): void {
     const denial = ultimateDenial(this.ultimate);
@@ -2220,6 +2279,10 @@ export class Game {
     }
 
     consumeUltimate(this.ultimate);
+    // Suppress charge for a beat after firing, which covers the instant
+    // Ultimates that leave no field behind to hold the flag up.
+    this.ultimateEcho = ULTIMATE_ECHO;
+    setUltimateActive(this.ultimate, true);
     this.tracker.ultimateUsed = true;
     // Short, non-disruptive activation: a beat of hit-stop and a flash, never
     // a cutscene, and the player keeps control throughout.
@@ -2320,6 +2383,7 @@ export class Game {
     if (this.pendingChest) this.tracker.chestOpened = true;
     this.pendingChest = null;
     this.audio.play('ui-click');
+    this.enemies.holdSpawning(RETURN_TO_PLAY_GRACE);
     this.setState('playing');
     this.input.requestLock();
   }
@@ -2362,6 +2426,9 @@ export class Game {
   private finishStory(): void {
     if (this.state !== 'story') return;
     this.audio.play('ui-click');
+    // Coming back from a screen the player was reading is a transition, not a
+    // cue to be jumped: the world stays quiet for a beat.
+    this.enemies.holdSpawning(RETURN_TO_PLAY_GRACE);
     this.setState('playing');
     this.input.requestLock();
   }
@@ -2492,7 +2559,7 @@ export class Game {
     clearEffects(this.healing);
     const lost = Math.round(this.player.maxEnergy * 0.4);
     this.ui.showDeath(
-      `The Verdance takes its due. You lose ${lost} aether, but your world, your affinity, your blessings, your terrain and every cleansed shrine remain.`,
+      `The Verdance takes its due. You lose ${lost} Mana, but your world, your affinity, your blessings, your terrain and every cleansed shrine remain.`,
     );
     if (this.save) this.persist();
   }
@@ -2531,6 +2598,12 @@ export class Game {
       this.ui.toast('Your checkpoint was unsafe — you wake on the nearest solid ground', 'warn', 3.4);
     }
     this.ui.toast('Protected for a moment', 'good', 2);
+
+    // Waking up is not a cue to be attacked: the world stays quiet for longer
+    // than the protection itself lasts, so nothing is already swinging when it
+    // expires.
+    this.enemies.encounter.reset();
+    this.enemies.holdSpawning(RESPAWN_GRACE);
 
     this.setState('playing');
     this.input.requestLock();
@@ -2646,6 +2719,18 @@ export class Game {
     if (!this.combatDebug.enabled || !this.debugFrame) return;
     this.combatDebug.update(dt, this.debugFrame);
     this.ui.setCombatDebug(this.combatDebug.readout(this.debugFrame));
+    // Pacing state, in the development overlay only. The overlay cannot be
+    // enabled at all in a production build, so this is never player-facing.
+    if (this.frameCount % 30 === 0) {
+      const status = this.enemies.encounterStatus;
+      const diag = this.enemies.spawnDiagnostics;
+      this.combatDebug.push(
+        `pace ${status.phase} budget ${status.budgetLeft.toFixed(1)}`
+        + ` reinf ${status.reinforcementLeft.toFixed(1)} t ${status.elapsed.toFixed(0)}s`
+        + (diag.refusal ? ` refused:${diag.refusal}` : '')
+        + (diag.rejection ? ` place:${diag.rejection}` : ''),
+      );
+    }
   }
 
   /**
@@ -2903,6 +2988,7 @@ export class Game {
     this.applyBuildToPlayer();
     if (this.save) this.save.build = this.run.build.toJSON();
     this.persist();
+    this.enemies.holdSpawning(RETURN_TO_PLAY_GRACE);
     this.setState('playing');
     this.input.requestLock();
   }
@@ -2910,6 +2996,7 @@ export class Game {
   private skipReward(): void {
     this.run.dismissRewards();
     this.audio.play('ui-back');
+    this.enemies.holdSpawning(RETURN_TO_PLAY_GRACE);
     this.setState('playing');
     this.input.requestLock();
   }

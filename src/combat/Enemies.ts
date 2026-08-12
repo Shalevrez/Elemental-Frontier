@@ -19,14 +19,17 @@ import type { ElementId } from '../elements/affinity';
 import { ELEMENTS } from '../elements/elements';
 import { SHRINE_SITES, type WorldMode } from '../world/shrineData';
 import {
-  ENEMY_TYPES, ELITE_MODIFIERS, eliteName, eliteStats, rollElites,
+  ENEMY_TYPES, ELITE_MODIFIERS, attackCategoryOf, effectiveResistance, eliteName,
+  eliteStats, rollElites,
   type EliteId, type EnemyKind as TypeKind, type EnemyTypeDef,
 } from './enemyTypes';
 import { StatusSet, type StatusId } from './status';
-import { CombatDirector, isFairSpawn } from './CombatDirector';
+import { CombatDirector, DEFAULT_DIRECTOR } from './CombatDirector';
 import { bodyCapsule, sphereVsCapsule, type Capsule, type Vec3 } from './hitVolumes';
-import { AIM, REACTION } from './combatConfig';
-import { SEA_LEVEL, WORLD_CENTER, WORLD_SIZE } from '../world/coords';
+import { AIM, ENCOUNTER, INCOMING, REACTION, SPAWN } from './combatConfig';
+import { EncounterDirector, type EncounterSignals, type EncounterStatus } from './encounter';
+import { isStranded, validateSpawn, type SpawnWorldProbe } from './spawnRules';
+import { WORLD_CENTER, WORLD_SIZE } from '../world/coords';
 import { SPAWN_PLAZA_RADIUS } from '../world/density';
 import {
   buildBurrower, buildCrawler, buildGuardian, buildRootHunter, buildShellback,
@@ -120,6 +123,20 @@ export interface EnemyContext {
   onEnemyKilled(kind: EnemyKind, elites: readonly EliteId[]): void;
   /** Current run difficulty multiplier. */
   difficulty(): number;
+
+  // ---- pacing inputs. All optional, so a test harness can omit them.
+  /** Player health as a fraction of maximum, for the low-health spawn guard. */
+  playerHealthFraction?(): number;
+  /** Player maximum health, so a single hit can be capped against it. */
+  playerMaxHealth?(): number;
+  /** False while a story beat, reward screen or transition owns the screen. */
+  isPlaying?(): boolean;
+  /** True while the player is inside post-respawn protection. */
+  isProtected?(): boolean;
+  /** True when a scenario is running its own spawns. */
+  scenarioDriven?(): boolean;
+  /** Non-terrain solids, so nothing is placed inside a prop or a boulder. */
+  isObstacle?(x: number, y: number, z: number, radius: number, height: number): boolean;
 }
 
 const barBgGeo = new THREE.PlaneGeometry(1, 0.11);
@@ -139,6 +156,7 @@ const _expired: StatusId[] = [];
 let nextEnemyUid = 1;
 const _probe: Vec3 = { x: 0, y: 0, z: 0 };
 const _weak = new THREE.Vector3();
+const _losOrigin = new THREE.Vector3();
 
 export class Enemy {
   readonly def: EnemyDef;
@@ -165,6 +183,16 @@ export class Enemy {
   awake = true;
   deathTimer = 0;
   attackPhase = 0;
+  /** True while the creature has been refused an attack and is repositioning. */
+  seekingPosition = false;
+  /** Which way it circles while it waits for an opening: +1 or -1. */
+  circleSign = 1;
+  /** Reinforcement waves a summoner has left, so support is never endless. */
+  summonsLeft = 3;
+  /** Seconds spent chasing without getting meaningfully closer. */
+  noProgressTimer = 0;
+  /** Best distance to the player this creature has managed while chasing. */
+  bestApproach = Infinity;
 
   /** Shared archetype data. */
   readonly type: EnemyTypeDef;
@@ -214,6 +242,9 @@ export class Enemy {
     this.type = ENEMY_TYPES[kind];
     this.def = toLegacyDef(this.type);
     this.uid = nextEnemyUid++;
+    // Alternate which way each creature circles, so a denied pack fans out
+    // around the player instead of all sliding the same way.
+    this.circleSign = (this.uid & 1) === 0 ? 1 : -1;
     this.elites = elites;
     this.displayName = eliteName(kind, elites);
     const es = eliteStats(elites);
@@ -375,7 +406,9 @@ export class Enemy {
    * 1 = normal, below 1 = resistant, near 0 = effectively immune.
    */
   resistanceTo(element: ElementId | null): number {
-    return element ? (this.type.resistance[element] ?? 1) : 1;
+    // Clamped rather than raw: a creature may be a bad match for an element,
+    // but it may never be something a focused adept simply cannot finish.
+    return element ? effectiveResistance(this.kind, element) : 1;
   }
 
   applySlow(factor: number, seconds: number): void {
@@ -434,8 +467,22 @@ export class Enemy {
   }
 
   /** Damage this creature deals after elites. */
-  attackDamage(base: number, difficulty: number): number {
-    return base * this.damageScale * difficulty;
+  /**
+   * What one of this creature's attacks actually deals.
+   *
+   * Capped as a fraction of the player's maximum health. Difficulty and elite
+   * modifiers multiply together, and at depth an elite heavy could otherwise
+   * take two thirds of the bar in a single swing - which is not difficulty,
+   * it is a coin flip. Bosses are allowed a higher ceiling because their
+   * wind-ups are longer and their markers are bigger.
+   */
+  attackDamage(base: number, difficulty: number, playerMaxHealth = 0): number {
+    const raw = base * this.damageScale * difficulty;
+    if (playerMaxHealth <= 0) return raw;
+    const fraction = this.type.role === 'boss'
+      ? INCOMING.maxBossHitFraction
+      : INCOMING.maxHitFraction;
+    return Math.min(raw, playerMaxHealth * fraction);
   }
 
   /** True when it cannot act right now. */
@@ -605,10 +652,16 @@ export class EnemyManager {
   /** Difficulty health multiplier. */
   healthScale = 1;
 
-  maxEnemies = 16;
+  maxEnemies = ENCOUNTER.maxWanderers;
   kills = 0;
   /** Fairness rules: attack tokens, rear telegraphs, safe spawn distance. */
   readonly director = new CombatDirector();
+  /** Pacing: when an encounter opens, how big it is, and when the world rests. */
+  readonly encounter = new EncounterDirector();
+  /** Why the last spawn attempt was refused. Debug overlay only. */
+  private lastRefusal: string | null = null;
+  /** Why the last candidate point was rejected. Debug overlay only. */
+  private lastSpawnRejection: string | null = null;
 
   constructor(private readonly ctx: EnemyContext) {
     this.group.name = 'enemies';
@@ -631,6 +684,28 @@ export class EnemyManager {
     this.healthScale = healthScale;
     this.eliteChance = eliteChance;
     this.director.setDepth(depth);
+    this.encounter.setDepth(depth);
+  }
+
+  /** Pacing state, for the HUD-free debug overlay and the tests. */
+  get encounterStatus(): EncounterStatus {
+    return this.encounter.status;
+  }
+
+  /** Why nothing spawned last tick. Debug overlay only; never player-facing. */
+  get spawnDiagnostics(): { refusal: string | null; rejection: string | null } {
+    return { refusal: this.lastRefusal, rejection: this.lastSpawnRejection };
+  }
+
+  /**
+   * Hold the world quiet for a while.
+   *
+   * Used by story beats, reward screens and world transitions, so combat can
+   * never start on top of a screen the player is reading.
+   */
+  holdSpawning(seconds: number): void {
+    this.encounter.hold(seconds);
+    this.resumeGrace = Math.max(this.resumeGrace, seconds);
   }
 
   get worldMode(): WorldMode {
@@ -654,9 +729,14 @@ export class EnemyManager {
     if (mode === 'peaceful') {
       this.dissolveAll();
       this.ctx.projectiles.clearOwner('enemy');
+      this.encounter.reset();
     } else {
       this.resumeGrace = 6;
       this.spawnTimer = 4;
+      // Leaving Peaceful Mode starts from a clean exploration phase rather
+      // than resuming whatever encounter was open before.
+      this.encounter.reset();
+      this.encounter.hold(6);
     }
   }
 
@@ -795,7 +875,7 @@ export class EnemyManager {
       this.updatePhysics(e, dt);
       e.updateVisual(dt, this.ctx.camera);
 
-      if (e.shrineIndex < 0 && e.pos.distanceTo(playerPos) > 95) {
+      if (e.shrineIndex < 0 && this.recoverIfStranded(e, dt, playerPos)) {
         this.group.remove(e.group);
         e.dispose();
         this.enemies.splice(i, 1);
@@ -803,6 +883,46 @@ export class EnemyManager {
     }
 
     this.updatePickups(dt, playerPos);
+  }
+
+  /**
+   * Remove a creature that can no longer take part in the fight.
+   *
+   * Terrain is destructible, so a creature can end up walled into a pit it
+   * cannot climb, or on the wrong side of a ridge, chasing a player it will
+   * never reach. Rather than leave it grinding against a rock forever it is
+   * quietly removed - without kill credit, without loot and without touching
+   * the encounter budget, so there is nothing here to farm.
+   *
+   * Returns true when the creature should be taken out of the world.
+   */
+  private recoverIfStranded(e: Enemy, dt: number, playerPos: THREE.Vector3): boolean {
+    const distance = e.pos.distanceTo(playerPos);
+    const chasing = e.alive && (e.state === 'chase' || e.state === 'detect');
+    if (chasing) {
+      // "Progress" is the closest this creature has ever managed to get. A
+      // creature that is genuinely circling keeps beating its own record; one
+      // stuck behind terrain never does.
+      if (distance < e.bestApproach - 0.75) {
+        e.bestApproach = distance;
+        e.noProgressTimer = 0;
+      } else {
+        e.noProgressTimer += dt;
+      }
+    } else {
+      e.noProgressTimer = 0;
+      e.bestApproach = Math.min(e.bestApproach, distance);
+    }
+    if (!isStranded(e.noProgressTimer, distance, chasing)) return false;
+    // Anything that is still alive is marked harvested first, so removal can
+    // never pay out a kill, a drop or an encounter credit.
+    if (e.alive) {
+      e.alive = false;
+      e.state = 'dead';
+      e.group.userData.harvested = true;
+      this.director.releaseOwner(e.uid);
+    }
+    return true;
   }
 
   private updateStatus(e: Enemy, dt: number): void {
@@ -869,8 +989,17 @@ export class EnemyManager {
     const fwd = this.ctx.getPlayerForward();
     const inFront = this.director.isInFront(_tmpA.x, _tmpA.z, fwd.x, fwd.z);
 
-    const grant = this.director.request(e.uid, attack.telegraph, inFront, attack.needsToken);
-    if (!grant.granted) return false;
+    const category = attackCategoryOf(attack, e.type.role);
+    const grant = category === null
+      ? this.director.requestUncontested(attack.telegraph, inFront)
+      : this.director.request(e.uid, attack.telegraph, inFront, category);
+    if (!grant.granted) {
+      // Denied attackers do not stand and stare: they go and make themselves a
+      // problem somewhere else while they wait for an opening.
+      e.seekingPosition = true;
+      return false;
+    }
+    e.seekingPosition = false;
 
     e.pendingAttack = attackIndex;
     e.telegraphTotal = grant.telegraph;
@@ -907,6 +1036,7 @@ export class EnemyManager {
     if (!attack) return;
 
     const difficulty = this.ctx.difficulty();
+    const maxHealth = this.ctx.playerMaxHealth?.() ?? 0;
     const dist = e.pos.distanceTo(playerPos);
     _dir.set(playerPos.x - e.pos.x, 0, playerPos.z - e.pos.z);
     const flat = _dir.length() || 1;
@@ -924,7 +1054,7 @@ export class EnemyManager {
             kind: e.kind === 'slinger' ? 'orb' : 'bolt', owner: 'enemy',
             origin: _tmpA.clone(), direction: dir,
             speed: e.kind === 'slinger' ? 15 : 11,
-            damage: e.attackDamage(attack.damage, difficulty),
+            damage: e.attackDamage(attack.damage, difficulty, maxHealth),
             radius: 0.5, life: 3.4, color: e.type.accent,
           });
         }
@@ -940,7 +1070,7 @@ export class EnemyManager {
           size: 0.26, life: 0.9, gravity: -13, drag: 0.55,
         });
         if (dist < attack.markerRadius) {
-          this.ctx.damagePlayer(e.attackDamage(attack.damage, difficulty), e.pos, attack.knockback);
+          this.ctx.damagePlayer(e.attackDamage(attack.damage, difficulty, maxHealth), e.pos, attack.knockback);
           this.director.notifyLanded();
         }
         if (e.kind === 'sapper') this.kill(e);
@@ -948,7 +1078,7 @@ export class EnemyManager {
       }
       case 'cone': {
         if (dist < attack.range) {
-          this.ctx.damagePlayer(e.attackDamage(attack.damage, difficulty), e.pos, attack.knockback);
+          this.ctx.damagePlayer(e.attackDamage(attack.damage, difficulty, maxHealth), e.pos, attack.knockback);
           this.director.notifyLanded();
         }
         this.ctx.particles.spark({
@@ -960,7 +1090,7 @@ export class EnemyManager {
       }
       default: {
         if (dist < attack.range + 0.6) {
-          this.ctx.damagePlayer(e.attackDamage(attack.damage, difficulty), e.pos, attack.knockback);
+          this.ctx.damagePlayer(e.attackDamage(attack.damage, difficulty, maxHealth), e.pos, attack.knockback);
           this.director.notifyLanded();
         }
         this.ctx.particles.spark({
@@ -974,9 +1104,13 @@ export class EnemyManager {
 
   /** Warden behaviour: call reinforcements to its side. */
   private summonFor(e: Enemy): void {
-    let live = 0;
-    for (const other of this.enemies) if (other.alive) live++;
-    if (live >= this.maxEnemies + 4) return;
+    // Reinforcements are finite. A Warden left alone used to call crawlers
+    // forever, which is the single easiest way to turn an encounter into an
+    // endless one: each Warden now has a fixed allowance, and the population
+    // ceiling applies to summons exactly as it does to spawns.
+    if (e.summonsLeft <= 0) return;
+    if (this.wandererCount() >= ENCOUNTER.maxWanderers) return;
+    e.summonsLeft -= 1;
     for (let i = 0; i < 2; i++) {
       const a = Math.random() * Math.PI * 2;
       const x = e.pos.x + Math.cos(a) * 3;
@@ -1071,6 +1205,10 @@ export class EnemyManager {
           e.vel.x += _dir.x * speed * 9 * dt;
           e.vel.z += _dir.z * speed * 9 * dt;
           this.tryHop(e);
+        } else if (e.seekingPosition || e.attackTimer > 0) {
+          // Denied a token, or between swings: keep working the angle rather
+          // than standing in place looking broken.
+          this.pressureMove(e, dt, speed, dist);
         }
         if (dist < e.def.attackRange && e.attackTimer <= 0) {
           this.beginAttack(e, 0, playerPos);
@@ -1101,10 +1239,15 @@ export class EnemyManager {
           const push = dist > standoff + 2 ? 1 : dist < standoff - 2 ? -1 : 0;
           e.vel.x += _dir.x * speed * push * 6 * dt;
           e.vel.z += _dir.z * speed * push * 6 * dt;
+          if ((e.seekingPosition || e.attackTimer > 0) && push === 0) {
+            this.pressureMove(e, dt, speed, dist);
+          }
         } else if (dist > e.def.attackRange * 0.8) {
           e.vel.x += _dir.x * speed * 7 * dt;
           e.vel.z += _dir.z * speed * 7 * dt;
           this.tryHop(e);
+        } else if (e.seekingPosition || e.attackTimer > 0) {
+          this.pressureMove(e, dt, speed, dist);
         }
 
         if (e.attackTimer <= 0) {
@@ -1123,6 +1266,43 @@ export class EnemyManager {
         }
         break;
       }
+    }
+  }
+
+  /**
+   * What a creature does while the director is refusing it an attack.
+   *
+   * The attack-token rule is what keeps a first-person fight fair, but a
+   * creature that simply freezes while it waits for a token reads as broken.
+   * Instead it keeps working: it circles for a flank, drifts in and out of its
+   * own reach, and stays visibly interested in the player. It is still a
+   * threat to walk backwards into - it just is not swinging yet.
+   *
+   * `_dir` is the normalised direction from the creature to the player, set by
+   * the caller, so this adds no square roots of its own.
+   */
+  private pressureMove(e: Enemy, dt: number, speed: number, dist: number): void {
+    // Strafe around the player, perpendicular to the line between them.
+    const sideX = -_dir.z * e.circleSign;
+    const sideZ = _dir.x * e.circleSign;
+    e.vel.x += sideX * speed * 4.5 * dt;
+    e.vel.z += sideZ * speed * 4.5 * dt;
+
+    // Hold a comfortable ring: press in when it drifts wide, give ground when
+    // it is close enough to be crowding, so the player is never boxed in by
+    // creatures that cannot act.
+    const ring = Math.max(2.2, e.def.attackRange * 0.95);
+    const radial = dist > ring + 1.2 ? 1 : dist < ring - 0.8 ? -1 : 0;
+    if (radial !== 0) {
+      e.vel.x += _dir.x * speed * radial * 3 * dt;
+      e.vel.z += _dir.z * speed * radial * 3 * dt;
+    }
+
+    // Occasionally switch which way it circles, so a denied creature does not
+    // orbit forever in one direction.
+    if (e.stateTime > 2.6) {
+      e.circleSign = -e.circleSign;
+      e.stateTime = 0;
     }
   }
 
@@ -1197,63 +1377,182 @@ export class EnemyManager {
   // ------------------------------------------------------------ spawning
 
   private updateSpawning(dt: number, playerPos: THREE.Vector3, playerAlive: boolean): void {
-    if (!playerAlive) return;
-    // Peaceful Mode never spawns anything hostile.
-    if (this.peaceful) return;
+    // Peaceful Mode never spawns anything hostile, and the director is held in
+    // its quiet state so nothing can be mid-encounter when the mode flips.
+    const peaceful = this.peaceful;
+    const wanderers = this.wandererCount();
+
+    this.encounter.update(dt, this.signals(playerPos, playerAlive, wanderers, peaceful));
+    if (peaceful || !playerAlive) return;
     if (this.resumeGrace > 0) return;
 
+    // A short cadence between attempts: the director decides *whether*, this
+    // decides how often it is asked.
     this.spawnTimer -= dt;
     if (this.spawnTimer > 0) return;
-    this.spawnTimer = 2.6;
+    this.spawnTimer = 0.75;
 
-    const wanderers = this.enemies.filter((e) => e.alive && e.shrineIndex < 0).length;
-    if (wanderers >= this.maxEnemies) return;
+    const signals = this.signals(playerPos, playerAlive, wanderers, peaceful);
+    const verdict = this.encounter.requestSpawn(signals);
+    this.lastRefusal = verdict.allowed ? null : (verdict.reason ?? null);
+    if (!verdict.allowed || verdict.threat <= 0) return;
 
-    let pressure = 0.45;
+    const fromReinforcement = this.encounter.status.budgetLeft <= 0;
+    const placed = this.placeGroup(playerPos, verdict.threat);
+    if (placed > 0) this.encounter.spend(placed, fromReinforcement);
+  }
+
+  /** Live creatures that belong to the wandering population, not to a shrine. */
+  private wandererCount(): number {
+    let n = 0;
+    for (const e of this.enemies) if (e.alive && e.shrineIndex < 0) n++;
+    return n;
+  }
+
+  /** Assemble the pacing inputs the encounter director reasons about. */
+  private signals(
+    playerPos: THREE.Vector3, playerAlive: boolean, wanderers: number, peaceful: boolean,
+  ): EncounterSignals {
+    return {
+      liveEnemies: wanderers,
+      engaged: this.hostilePressure(playerPos, 26),
+      healthFraction: this.ctx.playerHealthFraction?.() ?? 1,
+      playing: this.ctx.isPlaying?.() ?? true,
+      playerReady: playerAlive && !(this.ctx.isProtected?.() ?? false),
+      peaceful,
+      scenarioDriven: this.ctx.scenarioDriven?.() ?? false,
+      locationPressure: this.locationPressure(playerPos),
+    };
+  }
+
+  /**
+   * How much the surroundings want a fight to happen here.
+   *
+   * Standing near an uncleansed shrine is the game telling the player where
+   * the trouble is, so the exploration timer is allowed to run short there and
+   * long out in the open. That is the difference between "an encounter every
+   * 30-60 seconds" and "an encounter every 30-60 seconds *for a reason*".
+   */
+  private locationPressure(playerPos: THREE.Vector3): number {
+    let pressure = 0;
     for (const site of SHRINE_SITES) {
       if (this.cleansed[site.index]) continue;
       const d = Math.hypot(playerPos.x - site.x, playerPos.z - site.z);
-      if (d < 55) pressure = Math.max(pressure, 1 - d / 70);
+      if (d < 70) pressure = Math.max(pressure, 1 - d / 70);
     }
-    if (Math.random() > pressure) return;
+    return pressure;
+  }
 
-    const point = this.findSpawnPoint(playerPos);
-    if (!point) return;
-
+  /**
+   * Place a group worth roughly `threat` points of creatures.
+   *
+   * Returns the threat actually placed, which may be less than requested when
+   * no valid ground could be found - the budget is only charged for creatures
+   * that really exist.
+   */
+  private placeGroup(playerPos: THREE.Vector3, threat: number): number {
     const roster = this.roster.length > 0 ? this.roster : (['crawler', 'wisp'] as EnemyKind[]);
-    const kind = roster[Math.floor(Math.random() * roster.length)]!;
+    // Prefer a creature the budget can actually afford; fall back to the
+    // cheapest in the roster rather than overspending on a single heavy.
+    const affordable = roster.filter((k) => ENEMY_TYPES[k].threat <= threat + 0.01);
+    const pool = affordable.length > 0 ? affordable : [
+      roster.reduce((a, b) => (ENEMY_TYPES[a].threat <= ENEMY_TYPES[b].threat ? a : b)),
+    ];
+    const kind = pool[Math.floor(Math.random() * pool.length)]!;
     const type = ENEMY_TYPES[kind];
-    // Only light skirmishers travel in packs.
-    const packSize = type.threat <= 1.2 && Math.random() < 0.35
-      ? 2 + Math.floor(Math.random() * 2)
+
+    const point = this.findSpawnPoint(playerPos, type);
+    if (!point) return 0;
+
+    // Only light skirmishers travel in packs, and never more of them than the
+    // remaining budget pays for.
+    const maxPack = Math.max(1, Math.floor(threat / Math.max(0.5, type.threat)));
+    const packSize = type.threat <= 1.2 && maxPack > 1 && Math.random() < 0.4
+      ? Math.min(maxPack, 2 + Math.floor(Math.random() * 2))
       : 1;
-    for (let i = 0; i < packSize && this.enemies.length < this.maxEnemies + 6; i++) {
+
+    let spent = 0;
+    for (let i = 0; i < packSize; i++) {
+      if (this.wandererCount() >= ENCOUNTER.maxWanderers) break;
       _tmpA.copy(point);
       _tmpA.x += (Math.random() - 0.5) * 3;
       _tmpA.z += (Math.random() - 0.5) * 3;
       _tmpA.y = this.ctx.world.groundHeight(_tmpA.x, _tmpA.z) + 0.3;
       if (type.locomotion === 'hover') _tmpA.y += 2.6;
       this.spawnMaybeElite(kind, _tmpA, this.eliteChance, this.healthScale);
+      spent += type.threat;
     }
+    return spent;
   }
 
-  /** Somewhere on solid ground, well away from the player and the plaza. */
-  private findSpawnPoint(playerPos: THREE.Vector3): THREE.Vector3 | null {
-    const minRadius = 24;
-    for (let attempt = 0; attempt < 14; attempt++) {
+  /** A probe over the live world, used by the spawn validator. */
+  private spawnProbe(): SpawnWorldProbe {
+    const world = this.ctx.world;
+    const eye = this.ctx.getPlayerPosition();
+    return {
+      groundHeight: (x, z) => world.groundHeight(x, z),
+      isSolid: (x, y, z) => world.isSolid(x, y, z),
+      hasLineOfSight: (x, y, z) => {
+        _tmpB.set(x - eye.x, y - (eye.y + 1.6), z - eye.z);
+        const distance = _tmpB.length();
+        if (distance < 0.001) return true;
+        _tmpB.divideScalar(distance);
+        _losOrigin.set(eye.x, eye.y + 1.6, eye.z);
+        // No hit along the segment means nothing is in the way.
+        return world.raycast(_losOrigin, _tmpB, distance - 0.5) === null;
+      },
+      fluidLevel: world.fluidLevel,
+      fluidIsHazard: world.fluidIsHazard,
+      isObstacle: (x, y, z) => this.ctx.isObstacle?.(x, y, z, 0.6, 1.8) ?? false,
+      distanceToProtected: (x, z) => {
+        // The starting plaza and every shrine are kept clear.
+        let best = Math.max(0, Math.hypot(x - WORLD_CENTER, z - WORLD_CENTER) - SPAWN_PLAZA_RADIUS);
+        for (const site of SHRINE_SITES) {
+          best = Math.min(best, Math.hypot(x - site.x, z - site.z));
+        }
+        return best;
+      },
+    };
+  }
+
+  /**
+   * Somewhere a creature can legitimately have walked out of.
+   *
+   * Every candidate goes through the full validator: distance, view cone, line
+   * of sight, terrain clearance, water, lava, obstacles, protected structures
+   * and reachability. Nothing is placed that fails any one of them.
+   */
+  private findSpawnPoint(playerPos: THREE.Vector3, type: EnemyTypeDef): THREE.Vector3 | null {
+    const probe = this.spawnProbe();
+    const fwd = this.ctx.getPlayerForward();
+    const flying = type.locomotion === 'hover';
+    for (let attempt = 0; attempt < SPAWN.attempts; attempt++) {
       const angle = Math.random() * Math.PI * 2;
-      const radius = minRadius + Math.random() * 16;
+      const radius = SPAWN.minOccludedFrontDistance
+        + Math.random() * (SPAWN.maxDistance - SPAWN.minOccludedFrontDistance);
       const x = playerPos.x + Math.cos(angle) * radius;
       const z = playerPos.z + Math.sin(angle) * radius;
-      if (x < 6 || z < 6 || x >= WORLD_SIZE - 6 || z >= WORLD_SIZE - 6) continue;
-      if (Math.hypot(x - WORLD_CENTER, z - WORLD_CENTER) < SPAWN_PLAZA_RADIUS + 12) continue;
-      // Nothing may appear close behind the player.
-      const fwd = this.ctx.getPlayerForward();
-      if (!isFairSpawn(x - playerPos.x, z - playerPos.z, fwd.x, fwd.z, radius)) continue;
-      const y = this.ctx.world.groundHeight(x, z);
-      if (y < SEA_LEVEL + 0.5) continue;
-      if (this.ctx.world.isSolid(x, y + 1.2, z)) continue;
-      return _tmpB.set(x, y + 0.3, z).clone();
+      const check = validateSpawn(
+        {
+          x,
+          z,
+          playerX: playerPos.x,
+          playerY: playerPos.y,
+          playerZ: playerPos.z,
+          forwardX: fwd.x,
+          forwardZ: fwd.z,
+          frontHalfAngle: DEFAULT_DIRECTOR.frontHalfAngle,
+          flying,
+        },
+        probe,
+        WORLD_SIZE,
+      );
+      if (!check.ok) {
+        this.lastSpawnRejection = check.reason ?? null;
+        continue;
+      }
+      this.lastSpawnRejection = null;
+      return _tmpB.set(x, check.y, z).clone();
     }
     return null;
   }

@@ -58,7 +58,7 @@ export interface StatModifiers {
   airScale: number;
   /** Multiplies every cooldown (lower is faster). */
   cooldownScale: number;
-  /** Multiplies aether costs. */
+  /** Multiplies Mana costs. */
   costScale: number;
   /** Flat additions. */
   maxHealth: number;
@@ -84,9 +84,9 @@ export interface StatModifiers {
   // ---- added with the tradeoff / chest layer
   /** Multiplies maximum health (tradeoff penalties use this). */
   maxHealthScale: number;
-  /** Multiplies maximum aether. */
+  /** Multiplies maximum Mana. */
   maxEnergyScale: number;
-  /** Multiplies aether regeneration. */
+  /** Multiplies Mana regeneration. */
   regenScale: number;
   /** Multiplies the radius of area effects. */
   areaScale: number;
@@ -108,9 +108,9 @@ export interface StatModifiers {
   oxygenCapacity: number;
   /** Multiplies how fast oxygen drains (lower is better). */
   oxygenDrain: number;
-  /** Flat aether returned on a damaging hit. */
+  /** Flat Mana returned on a damaging hit. */
   manaOnHit: number;
-  /** Flat aether returned when a creature is defeated. */
+  /** Flat Mana returned when a creature is defeated. */
   manaOnKill: number;
   /** Multiplies the strength of status effects the player applies. */
   statusPower: number;
@@ -416,7 +416,7 @@ const AIR: UpgradeDef[] = [
   }),
   up({
     id: 'air-featherfall', name: 'Featherfall', rarity: 'common', element: 'air',
-    description: 'An extra air dash, and dashes cost less aether.',
+    description: 'An extra air dash, and dashes cost less Mana.',
     tags: ['mobility', 'speed'], grants: ['extra-dash'], maxStacks: 2,
     stats: { costScale: 0.9 }, synergy: ['mobility'],
   }),
@@ -445,7 +445,7 @@ const GENERIC: UpgradeDef[] = [
   }),
   up({
     id: 'any-deep-well', name: 'Deep Well', rarity: 'common', element: 'any',
-    description: '+25 maximum aether and +1.5 regeneration.',
+    description: '+25 maximum Mana and +1.5 regeneration.',
     tags: ['sustain'], maxStacks: 4, stats: { maxEnergy: 25, energyRegen: 1.5 },
   }),
   up({
@@ -486,7 +486,7 @@ const GENERIC: UpgradeDef[] = [
   }),
   up({
     id: 'any-overcharge', name: 'Overcharge', rarity: 'epic', element: 'any',
-    description: 'Big damage, but every ability costs far more aether.',
+    description: 'Big damage, but every ability costs far more Mana.',
     tags: ['power'], maxStacks: 1, stats: { damageScale: 1.5, costScale: 1.45 },
   }),
   up({
@@ -936,7 +936,7 @@ export function accumulateStats(target: StatModifiers, def: UpgradeDef, stacks: 
  *
  * Tradeoff cards deliberately push numbers downward, so this is also the
  * safety net that stops a stack of penalties from reducing a critical value -
- * health, aether, movement, range - below a playable minimum.
+ * health, Mana, movement, range - below a playable minimum.
  */
 export function clampStats(stats: StatModifiers): StatModifiers {
   stats.armor = Math.min(0.75, Math.max(0, stats.armor));

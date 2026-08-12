@@ -17,6 +17,7 @@ import {
   type ScenarioKind, type ScenarioState,
 } from '../game/scenarios';
 import { worldDef, type WorldDef, type WorldId } from '../world/worlds';
+import { INCOMING } from '../combat/combatConfig';
 
 /** How many encounters between reward offers. */
 export const ENCOUNTERS_PER_REWARD = 1;
@@ -185,9 +186,23 @@ export class RunState {
 
   // -------------------------------------------------------------- meta
 
-  /** Difficulty scalar applied to enemy health and damage. */
+  /** Difficulty scalar applied to enemy health. */
   get difficulty(): number {
-    return 1 + Math.min(1.6, this.depth * 0.055);
+    return 1 + Math.min(INCOMING.healthCap, this.depth * INCOMING.healthPerDepth);
+  }
+
+  /**
+   * Difficulty scalar applied to enemy *damage*.
+   *
+   * Deliberately much flatter than the health curve. Health climbing makes a
+   * fight longer, which the player can answer with better play; damage
+   * climbing at the same rate makes a fight shorter in a way they cannot,
+   * because a first-person player cannot read their way out of a hit that
+   * removes half the bar. Depth is meant to be tested by endurance, not by
+   * one-shot kills.
+   */
+  get damageDifficulty(): number {
+    return 1 + Math.min(INCOMING.damageCap, this.depth * INCOMING.damagePerDepth);
   }
 
   /** Chance that a spawned creature is promoted to an elite. */

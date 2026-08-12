@@ -1145,7 +1145,7 @@ export function buildMote(color: number): PropBuild {
   return { group, materials, animated: [core, ring, ring2] };
 }
 
-/** Small floating aether pickup dropped by defeated creatures. */
+/** Small floating Mana pickup dropped by defeated creatures. */
 export function geoPickup(): THREE.BufferGeometry {
   return track(new THREE.IcosahedronGeometry(0.24, 1));
 }

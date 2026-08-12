@@ -147,7 +147,7 @@ export const SHRINE_UPGRADES: readonly UpgradeDef[] = Object.freeze([
   Object.freeze({
     id: 'wellspring',
     title: 'Blessing of the Wellspring',
-    lines: ['+35 maximum aether', '+2.5 aether regeneration', 'Elemental power +8%'],
+    lines: ['+35 maximum Mana', '+2.5 Mana regeneration', 'Elemental power +8%'],
     maxHealth: 0, maxEnergy: 35, energyRegen: 2.5, cooldownScale: 1, moveScale: 1, powerScale: 1.08,
   }),
   Object.freeze({
@@ -159,7 +159,7 @@ export const SHRINE_UPGRADES: readonly UpgradeDef[] = Object.freeze([
   Object.freeze({
     id: 'striding',
     title: 'Blessing of Striding',
-    lines: ['+14% movement speed', '+15 maximum aether', 'Elemental power +10%'],
+    lines: ['+14% movement speed', '+15 maximum Mana', 'Elemental power +10%'],
     maxHealth: 0, maxEnergy: 15, energyRegen: 0.5, cooldownScale: 1, moveScale: 1.14, powerScale: 1.1,
   }),
 ]);

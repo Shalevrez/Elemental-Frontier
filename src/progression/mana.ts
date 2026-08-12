@@ -1,5 +1,5 @@
 /**
- * Mana (aether) economy.
+ * Mana economy.
  *
  * The goal is that a player is never reduced to running in circles waiting for
  * a bar. So:
@@ -15,16 +15,23 @@
 
 import type { ElementId } from '../elements/affinity';
 
-/** Regeneration multiplier while something hostile is nearby. */
-export const IN_COMBAT_REGEN_SCALE = 0.55;
+/**
+ * Regeneration multiplier while something hostile is nearby.
+ *
+ * Raised from 0.55: at the old rate a primary rotation outran regeneration
+ * roughly five to one, so an ordinary fight settled into the weakened fallback
+ * within about seven seconds. Combat should ask for decisions, not for
+ * patience.
+ */
+export const IN_COMBAT_REGEN_SCALE = 0.75;
 /** Regeneration multiplier once the fight has been over for a moment. */
-export const OUT_OF_COMBAT_REGEN_SCALE = 2.1;
+export const OUT_OF_COMBAT_REGEN_SCALE = 2.6;
 /** Seconds without combat before the faster regeneration kicks in. */
-export const OUT_OF_COMBAT_DELAY = 3.5;
+export const OUT_OF_COMBAT_DELAY = 2.5;
 /** A cast costing at least this fraction of the pool pauses regeneration. */
 export const EXPENSIVE_FRACTION = 0.28;
 /** How long regeneration pauses after an expensive cast. */
-export const CAST_PAUSE = 1.1;
+export const CAST_PAUSE = 0.9;
 /** Below this fraction the HUD shows the low-mana warning. */
 export const LOW_MANA_FRACTION = 0.22;
 /** Fraction of maximum mana the free fallback attack needs. */
@@ -32,6 +39,35 @@ export const FALLBACK_COST_FRACTION = 0.04;
 
 /** Terrain affinity bonus: extra regeneration per second when it applies. */
 export const TERRAIN_BONUS_REGEN = 3.2;
+
+/**
+ * Refund throttling.
+ *
+ * Every elemental recovery mechanic - Water near water, Fire from burning
+ * kills, Earth from terrain, Air from deflection - pays Mana back, and an
+ * on-hit refund combined with a multi-hit ability used to pay out once per
+ * target per tick. That is an infinite pool, not an economy. Refunds are
+ * therefore metered: a rolling per-second ceiling, expressed as a fraction of
+ * the maximum pool, with anything over the line simply dropped.
+ *
+ * The ceiling is deliberately set below the cheapest primary rotation's cost
+ * per second, so refunds are always a discount on the economy and never a
+ * replacement for it.
+ */
+export const REFUND_RATE_LIMIT = 0.15;
+/** Length of the rolling window the refund limit is measured over. */
+export const REFUND_WINDOW = 1;
+/** Hard ceiling on a single refund, as a fraction of the pool. */
+export const REFUND_SINGLE_CAP = 0.18;
+
+/**
+ * Free-cast ceiling.
+ *
+ * Timed blessings can grant zero-cost casting. Stacking them used to be
+ * additive-by-maximum with no ceiling, so two overlapping grants could keep a
+ * player casting for free indefinitely; the total is now capped.
+ */
+export const FREE_CAST_CAP = 12;
 
 export interface ManaState {
   /** Seconds left of the post-cast regeneration pause. */
@@ -43,10 +79,17 @@ export interface ManaState {
   /** Overflow banked from excess pickups, spent as a small temporary boost. */
   overflow: number;
   overflowTimer: number;
+  /** Mana refunded inside the current rolling window. */
+  refunded: number;
+  /** Seconds left of the current refund window. */
+  refundWindow: number;
 }
 
 export function createManaState(): ManaState {
-  return { castPause: 0, sinceCombat: 99, freeCast: 0, overflow: 0, overflowTimer: 0 };
+  return {
+    castPause: 0, sinceCombat: 99, freeCast: 0, overflow: 0, overflowTimer: 0,
+    refunded: 0, refundWindow: 0,
+  };
 }
 
 export interface ManaContext {
@@ -75,6 +118,10 @@ export interface ManaTick {
 export function tickMana(state: ManaState, dt: number, ctx: ManaContext): ManaTick {
   if (state.castPause > 0) state.castPause = Math.max(0, state.castPause - dt);
   if (state.freeCast > 0) state.freeCast = Math.max(0, state.freeCast - dt);
+  if (state.refundWindow > 0) {
+    state.refundWindow = Math.max(0, state.refundWindow - dt);
+    if (state.refundWindow === 0) state.refunded = 0;
+  }
   if (state.overflowTimer > 0) {
     state.overflowTimer = Math.max(0, state.overflowTimer - dt);
     if (state.overflowTimer === 0) state.overflow = 0;
@@ -104,9 +151,30 @@ export function notifyCombat(state: ManaState): void {
   state.sinceCombat = 0;
 }
 
-/** Grant a window during which abilities cost nothing. */
+/** Grant a window during which abilities cost nothing, up to the hard cap. */
 export function grantFreeCast(state: ManaState, seconds: number): void {
-  state.freeCast = Math.max(state.freeCast, seconds);
+  state.freeCast = Math.min(FREE_CAST_CAP, Math.max(state.freeCast, seconds));
+}
+
+/**
+ * Meter a Mana refund.
+ *
+ * Returns how much of the requested refund is actually payable, after the
+ * single-refund cap and the rolling per-second ceiling. Callers add only the
+ * returned amount, which is what closes every refund loop at once rather than
+ * patching them one ability at a time.
+ */
+export function allowRefund(state: ManaState, amount: number, maxMana: number): number {
+  if (!(amount > 0) || maxMana <= 0) return 0;
+  const single = Math.min(amount, maxMana * REFUND_SINGLE_CAP);
+  if (state.refundWindow <= 0) {
+    state.refundWindow = REFUND_WINDOW;
+    state.refunded = 0;
+  }
+  const budget = Math.max(0, maxMana * REFUND_RATE_LIMIT - state.refunded);
+  const granted = Math.min(single, budget);
+  state.refunded += granted;
+  return granted;
 }
 
 export function isFreeCast(state: ManaState): boolean {

@@ -14,6 +14,7 @@
 
 import { Mat, type MaterialId } from './materials';
 import type { World } from './World';
+import { INCOMING } from '../combat/combatConfig';
 
 export type ZoneKind = 'burning' | 'wet' | 'ice' | 'slippery' | 'steam' | 'smoke';
 
@@ -161,7 +162,10 @@ export class TerrainEffects {
       const dz = zone.z - z;
       if (dx * dx + dz * dz <= zone.radius * zone.radius) dps += zone.dps;
     }
-    return dps;
+    // Overlapping zones stack, but not without limit: three burning patches
+    // laid over one another used to be three times the damage per second,
+    // which is how a player dies to standing still for a moment.
+    return Math.min(INCOMING.maxEnvironmentDps, dps);
   }
 
   /** True when the ground here has been made slippery (ice). */

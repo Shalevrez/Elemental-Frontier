@@ -281,6 +281,17 @@ describe('single-element progression', () => {
 // =====================================================================
 
 describe('ultimate charge', () => {
+  /**
+   * Fill the meter the way play does: repeated damage spread over time, with
+   * the clock advancing so the per-second charge ceiling releases each window.
+   */
+  function fillMeter(state: ReturnType<typeof createUltimateState>): void {
+    for (let i = 0; i < 200 && state.charge < ULTIMATE_MAX; i++) {
+      addCharge(state, 'damage-dealt', 400);
+      tickUltimate(state, 1.05);
+    }
+  }
+
   it('does not charge while locked', () => {
     const state = createUltimateState(false);
     expect(addCharge(state, 'damage-dealt', 500)).toBe(0);
@@ -330,7 +341,7 @@ describe('ultimate charge', () => {
     expect(isUltimateReady(state)).toBe(false);
     expect(ultimateDenial(state)).toBe('charging');
 
-    addCharge(state, 'damage-dealt', 100000);
+    fillMeter(state);
     expect(state.charge).toBe(ULTIMATE_MAX);
     expect(isUltimateReady(state)).toBe(true);
     expect(ultimateDenial(state)).toBeNull();
@@ -339,8 +350,8 @@ describe('ultimate charge', () => {
     expect(state.charge).toBe(0);
     expect(state.lockout).toBe(ULTIMATE_LOCKOUT);
 
-    // Even refilled instantly, the lockout blocks a second cast.
-    addCharge(state, 'damage-dealt', 100000);
+    // Even refilled immediately, the lockout blocks a second cast.
+    fillMeter(state);
     expect(ultimateDenial(state)).toBe('cooldown');
     expect(consumeUltimate(state)).toBe(false);
 
@@ -350,7 +361,10 @@ describe('ultimate charge', () => {
 
   it('signals the moment the meter becomes full', () => {
     const state = createUltimateState(true);
-    addCharge(state, 'damage-dealt', 100000);
+    for (let i = 0; i < 200 && !state.justReady; i++) {
+      addCharge(state, 'damage-dealt', 400);
+      if (!state.justReady) tickUltimate(state, 1.05);
+    }
     expect(state.justReady).toBe(true);
     tickUltimate(state, 0.016);
     expect(state.justReady).toBe(false);

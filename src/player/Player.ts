@@ -20,6 +20,7 @@ import { Mat } from '../world/materials';
 import type { ElementId } from '../elements/affinity';
 import type { UpgradeTotals } from '../world/shrineData';
 import type { ObstacleField } from '../world/Obstacles';
+import { INCOMING } from '../combat/combatConfig';
 import {
   BODY_SPHERES, EYE_HEIGHT, MAX_WALKABLE_NORMAL_Y, PLAYER_HEIGHT, PLAYER_RADIUS,
   createContactReport, depenetrate, probeGround, sweepMove,
@@ -472,13 +473,15 @@ export class Player {
       this.shield -= soaked;
       dmg -= soaked;
       if (dmg <= 0.01) {
-        if (!ignoreInvuln) this.invulnTimer = 0.4;
+        if (!ignoreInvuln) this.invulnTimer = INCOMING.postShieldInvuln;
         return 0;
       }
     }
 
     this.health -= dmg;
-    if (!ignoreInvuln) this.invulnTimer = 0.55;
+    // The window that stops a stagger lock: a second attack cannot land inside
+    // it, so control always comes back between hits.
+    if (!ignoreInvuln) this.invulnTimer = INCOMING.postHitInvuln;
     this.addShake(Math.min(0.7, 0.18 + dmg * 0.012), 5);
 
     if (from && knockback > 0) {

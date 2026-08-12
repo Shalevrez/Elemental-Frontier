@@ -93,7 +93,7 @@ export const CHEST_BUFFS: Readonly<Record<string, BuffDef>> = Object.freeze({
     stats: { cooldownScale: 0.75 },
   }),
   'buff-flow': buff({
-    id: 'buff-flow', name: 'Flowing Aether', color: 0x63d38a, seconds: 60,
+    id: 'buff-flow', name: 'Flowing Mana', color: 0x63d38a, seconds: 60,
     description: 'Mana regeneration ×2 and ability costs −20% while it lasts.',
     stats: { regenScale: 2, costScale: 0.8 },
   }),

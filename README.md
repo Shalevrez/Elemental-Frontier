@@ -233,7 +233,7 @@ slightly smaller focused power bonus from shrine blessings.
 
 ## Abilities
 
-Every active ability costs **aether**, has its own cooldown, particle effect and synthesised sound.
+Every active ability costs **Mana**, has its own cooldown, particle effect and synthesised sound.
 
 | Element | Primary (LMB) | Secondary (RMB) | Technique (Q) | Ultimate (MMB / R) | Passive |
 | --- | --- | --- | --- | --- | --- |
@@ -244,11 +244,19 @@ Every active ability costs **aether**, has its own cooldown, particle effect and
 
 ### The Ultimate meter
 
-Ultimates do **not** spend aether. Each element has a separate Ultimate meter that fills by
+Ultimates do **not** spend Mana. Each element has a separate Ultimate meter that fills by
 *fighting*: dealing damage, applying elemental status, defeating creatures, chaining hits inside a
 combo window, deflecting shots, shattering frozen targets, and using the terrain against something.
 Taking damage also contributes, but only up to a quarter of the bar, so standing in fire is never a
-charging strategy — and hitting scenery contributes nothing at all.
+charging strategy — and hitting scenery contributes nothing at all. Terrain interactions only pay
+out when they actually connect with something, and are themselves capped per fill, so freezing bare
+ground or cracking an empty field earns nothing.
+
+Every source runs through one rolling **per-second ceiling**, which is what rate-limits multi-hit
+abilities: twenty small hits in a frame are worth exactly what one large hit is worth. An Ultimate
+grants **no charge at all** while it is running, so an Ultimate can never pay for the next one.
+Between them these put a full meter at roughly **two to four meaningful encounters** for an active
+player.
 
 The Ultimate becomes available the moment you restore your first shrine. It needs a **full** meter,
 spends all of it, has an eight-second lockout so it cannot be chained, never removes your control,
@@ -412,9 +420,9 @@ Neither gate ever depends on your element.
 Granted in cleansing order regardless of which shrine you did first or which mode you are in:
 
 1. **Blessing of Vitality** — +30 max health, full heal, +8 % elemental power
-2. **Blessing of the Wellspring** — +35 max aether, +2.5 regeneration, +8 % elemental power
+2. **Blessing of the Wellspring** — +35 max Mana, +2.5 regeneration, +8 % elemental power
 3. **Blessing of Quickening** — all cooldowns −20 %, +10 max health, +8 % elemental power
-4. **Blessing of Striding** — +14 % movement speed, +15 max aether, +10 % elemental power
+4. **Blessing of Striding** — +14 % movement speed, +15 max Mana, +10 % elemental power
 
 No blessing ever grants another element.
 
@@ -472,6 +480,24 @@ When a hit lands the crosshair flashes differently depending on what happened �
 a normal hit, a critical, a status application, a blocked hit, a resisted hit,
 an immune target, or a kill.
 
+### The Mana economy
+
+A full bar pays for several primary casts plus one real secondary or technique,
+and regeneration continues *during* combat rather than stopping dead. Out of
+combat it more than triples after a short lull, so there is never a reason to
+stand still waiting for a bar.
+
+When you cannot afford the full price, the primary still fires — at 45 % power
+for a token amount of Mana — so a fight never degenerates into running away.
+It is deliberately worse per point of Mana than a properly funded cast.
+
+Each element can draw Mana back out of the world it is suited to: Water near
+open water, Earth from terrain that connects with something, Fire from what it
+sets alight, Air from deflection and speed. All of it runs through one metered
+ceiling that sits *below* the cheapest primary rotation's cost per second, so
+recovery is always a discount on the economy and never a replacement for it —
+there is no infinite pool, no permanent zero-cost casting and no refund loop.
+
 ### The water combo
 
 Water Whip is a short stream rather than a single bullet. It stays out for
@@ -482,6 +508,105 @@ creature only every 0.12 s, so its damage is predictable. It leaves the target
 Freeze on a soaked target locks it down for far longer than on a dry one, and
 frozen bodies turn pale and glassy. Hitting frozen ice with Earth shatters it.
 So the full chain is: **soak, freeze, break**.
+
+### Pacing: how a fight starts, peaks and ends
+
+The world is not a faucet. A director drives a cycle, and every phase of it is
+a real state rather than a timer:
+
+**explore → buildup → active → peak → resolve → recover → explore**
+
+- **Explore** is quiet on purpose. The longer you go without finding anything,
+  the more willing the director becomes to seed the next encounter, so you
+  normally meet something within **30–60 seconds** — sooner near an uncleansed
+  shrine, later out in open country. It is rising pressure, not a metronome.
+- **Buildup** places the first creatures at a distance, with a couple of
+  seconds before anything is allowed to engage.
+- **Active** spends the encounter's threat budget; **peak** is the point at
+  which reinforcements have stopped coming.
+- **Reinforcements are finite**: a second, smaller budget, and they close
+  entirely part-way through the fight. Nothing trickles in forever, and a
+  Warden can only call a fixed number of waves.
+- **Resolve → recover** guarantees a quiet spell of about nine seconds after a
+  real fight, so the next thing you meet is something you walked into.
+
+Two encounters never overlap, nothing spawns while you are below a quarter
+health, and the world stays quiet for a beat whenever control comes back from
+a story beat, a reward card, a chest or a world transition — and for longer
+after a respawn than the respawn protection itself lasts.
+
+### Where a creature is allowed to appear
+
+A candidate point has to survive all of this before anything stands on it:
+
+| Rule | Why |
+| --- | --- |
+| ≥ 28 m if you can actually see the spot | nothing pops into view |
+| ≥ 16 m if it is in front but behind cover | you get to discover it |
+| ≥ 26 m if it is outside your view | time to hear it and turn |
+| ≤ 46 m | further away and it would never find you |
+| solid, level-enough ground with 2.2 m of headroom | not inside the world |
+| not in water, not in lava | unless it is built for the hazard |
+| clear of props, boulders and shrines | nothing materialises on a structure |
+| a neighbouring column it can walk to | not stranded on a pillar |
+
+Terrain is destructible, so a creature can still end up walled into a pit it
+cannot climb. Anything that spends twelve seconds chasing without getting
+closer, or that ends up more than 95 m away, is quietly removed — without kill
+credit, loot or encounter progress, so there is nothing there to farm.
+
+### Attack tokens: how many things may swing at once
+
+Tokens are spent by **weight**, not head count, because a ground slam and a
+pot-shot are not the same amount of pressure in first person.
+
+| | Weight |
+| --- | --- |
+| Ordinary melee swing | 1 |
+| Heavy area or cone attack with a wide marker | 2 |
+| Ranged volley | 1, from its own separate pool |
+
+The budget is **2 early, 3 from depth 6, 4 from depth 15** — so early
+encounters present one or two dangerous attackers and a late-game arena at
+most four. Ranged fire draws on a pool of its own (1, then 2), which is what
+stops a line of spitters from filling the air while something is already
+mid-swing.
+
+Some combinations are simply never allowed: two wide area attacks at once, an
+off-screen shot while a heavy attack is committed, a heavy attack starting
+behind you while shots are in the air, or more than one attack of any kind
+coming from outside your view.
+
+A creature refused a token does not stand still. It circles for a flank, holds
+a ring at the edge of its own reach, presses in when it drifts wide and gives
+ground when it is crowding you — it is still something to be careful about
+backing into, it just is not swinging yet.
+
+### Durability and damage
+
+Creatures sit in four pacing bands, and the tuning is checked against real
+attack speed, cooldowns and elemental resistance rather than by eye:
+
+| Band | Examples | Time to kill with one element's primary |
+| --- | --- | --- |
+| Small | Crawler, Wisp, Thorn Spitter, Ember Burst | under 3 s |
+| Standard | Root-Bound Hunter, Slinger, Magma Beast | under 6.5 s |
+| Heavy | Brute, Stone Beast, Obsidian-Clad, Crystal-Clad | under 14 s |
+| Guardian | Shrine Guardian, the Sundering Maw | paced by phases |
+
+Resistances are clamped to the range **0.55 – 1.8**. Fire really is the wrong
+answer to an Obsidian-Clad and Water really is the right answer to a Magma
+Beast — but no creature the campaign requires you to fight can shrug off an
+entire element, so a focused adept is never left holding a build the game has
+decided not to accept.
+
+Incoming damage is capped separately from incoming health. Enemy **health**
+climbs with depth up to ×2.6; enemy **damage** climbs far more gently, to
+×1.6, and no single non-boss hit may ever take more than **32 %** of your
+maximum health (a boss may take 45 %, because its wind-ups are longer). You
+always have at least three hits of margin from full. A hit is followed by a
+0.6-second window in which nothing else can land, so you never lose control to
+a chain of them, and stacked burning ground is capped rather than additive.
 
 ### Combat debug overlay (development only)
 
@@ -541,7 +666,7 @@ Neither food nor potions can heal past maximum health, and neither can be used a
 ### 4. Resting
 
 Walk up to a **campfire** or a **cleansed shrine** and hold `E` for about three seconds. Resting
-fully restores health, refills aether, clears cooldowns, saves the game, moves your respawn point,
+fully restores health, refills Mana, clears cooldowns, saves the game, moves your respawn point,
 and nudges the time of day forward. It is interrupted by damage, and is refused in Normal Mode while
 a hostile creature is close. In Peaceful Mode it is always available at a valid site.
 
@@ -678,7 +803,7 @@ Everything lives in your browser's LocalStorage under two keys:
 
 The world save (**version 5**) holds the save-data version, world seed, elemental affinity, the
 active element for Convergence, the **world mode**, per-shrine cleansed / guardian / mote state, your
-position and view angles, respawn point and its world, health, aether, blessings earned, carried
+position and view angles, respawn point and its world, health, Mana, blessings earned, carried
 terrain materials, healing items, the **terrain brush journal**, which props and chests you have
 opened, playtime and tutorial state.
 
@@ -779,7 +904,11 @@ elemental-frontier/
     │   └── mana.ts             the Mana economy
     ├── combat/
     │   ├── Enemies.ts          creature bodies, AI, damage, drops, peaceful mode
-    │   ├── enemyTypes.ts       archetypes, body plans, weak points, elites (data)
+    │   ├── enemyTypes.ts       archetypes, tiers, body plans, weak points, elites (data)
+    │   ├── combatConfig.ts     the central tuning table every other file reads (data)
+    │   ├── CombatDirector.ts   weighted attack tokens and telegraph fairness (pure)
+    │   ├── encounter.ts        the encounter pacing cycle and its budgets (pure)
+    │   ├── spawnRules.ts       spawn placement validation and stuck recovery (pure)
     │   ├── CollisionDebug.ts   F10 collision visualiser (development only)
     │   └── Projectiles.ts      pooled projectiles and deflection
     ├── fx/
@@ -823,6 +952,11 @@ npm test
   fallback cast, oxygen drain, recovery and drowning cadence, elemental terrain interactions, story
   sequencing, world distinctness and the redesigned monsters.
 - **Save** — version 4 → 5 migration keeping everything and defaulting the new layer safely.
+- **Balance** — deterministic time-to-kill for every creature against every element, per-hit
+  incoming-damage ceilings, cooldown and cost ordering, Mana regeneration and refund throttling,
+  cost-reduction caps, Ultimate charge rate limits and per-source caps, weighted attack-token
+  budgets, the whole encounter cycle driven forward in simulation, spawn placement validation,
+  Peaceful Mode refusing every spawn, and the save schema staying exactly where it was.
 
 
 - **Affinity** — total weight is exactly 11, the exact weight table, every integer roll in `0..10`
