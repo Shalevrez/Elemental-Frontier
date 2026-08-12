@@ -359,9 +359,15 @@ export class UI {
     return this.current;
   }
 
-  setLoading(progress: number, note: string): void {
-    el<HTMLElement>('loading-fill').style.width = `${Math.round(progress * 100)}%`;
+  setLoading(progress: number, note: string, title?: string): void {
+    // A load can be a fresh world, a Continue or a step through the Beacon, and
+    // the destination is the one thing a waiting player wants to see. The title
+    // was fixed in the markup and named the first world whichever one was
+    // actually being built.
+    const fraction = Number.isFinite(progress) ? Math.max(0, Math.min(1, progress)) : 0;
+    el<HTMLElement>('loading-fill').style.width = `${Math.round(fraction * 100)}%`;
     el<HTMLElement>('loading-note').textContent = note;
+    if (title) el<HTMLElement>('loading-title').textContent = title;
   }
 
   setNewWorldMode(mode: WorldMode): void {

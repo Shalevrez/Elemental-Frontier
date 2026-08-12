@@ -1,7 +1,7 @@
 {
   "name": "elemental-frontier",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "description": "Elemental Frontier - a first-person voxel sandbox adventure of shrines, storms and stone.",
   "scripts": {

@@ -272,3 +272,22 @@ export function tickBeaconHold(
 export function beaconHoldFraction(hold: BeaconHold): number {
   return Math.max(0, Math.min(1, hold.held / BEACON.holdSeconds));
 }
+
+/**
+ * Does the Beacon own the interact hold right now?
+ *
+ * A Beacon is placed *beside the shrine the player finished last*, and a
+ * cleansed shrine is also a rest site. Both are used by holding the same key,
+ * so standing on the Beacon used to charge the hold and start a rest at the
+ * same time - and a rest draws a full-screen blackout that nothing clears once
+ * the world is torn down, leaving the destination world loaded but invisible.
+ *
+ * Inside the Beacon's own radius the Beacon wins: a player who walked to the
+ * way out is leaving, not sleeping. Resting is still available a few paces
+ * away, everywhere else on the shrine, and at every campfire.
+ */
+export function beaconOwnsHold(mode: BeaconMode, distance: number): boolean {
+  if (mode === 'dormant') return false;
+  if (!Number.isFinite(distance)) return false;
+  return distance <= BEACON.interactRadius;
+}

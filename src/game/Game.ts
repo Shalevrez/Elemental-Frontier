@@ -67,10 +67,15 @@ import { BuffTracker, combineModifiers } from '../progression/buffs';
 import { CHEST_BUFFS, chestRarityLabel, rollChestOutcome, type ChestOutcome } from '../progression/chests';
 import { StoryProgress, type StoryBeat } from './story';
 import {
-  BEACON, beaconHoldFraction, beaconMode, beaconObjective, beaconPrompt,
+  BEACON, beaconHoldFraction, beaconMode, beaconObjective, beaconOwnsHold, beaconPrompt,
   createBeaconHold, placeBeacon, tickBeaconHold, worldComplete,
   completionProgress, type BeaconWorldProbe,
 } from '../world/beacon';
+import {
+  beginTransition, completeTransition, createTransition, failTransition,
+  isTransitionActive, noteTransitionProgress, transitionMessage, transitionStalled,
+  type TransitionFailure,
+} from './transition';
 import { NG_PLUS, ngCycles } from '../world/progression';
 import {
   WORLD_ORDER, isWorldId, nextWorld, worldDef, worldIndex, type WorldId,
@@ -202,8 +207,14 @@ export class Game {
   private lavaTick = 0;
   /** Cooldown between deep-cold warnings, so the toast is not constant. */
   private coldWarn = 0;
-  /** True while a world transition is in flight, so it cannot be started twice. */
-  private transitioning = false;
+  /**
+   * The world transition in flight, if any.
+   *
+   * Owns the recovery snapshot and the stall backstop as well as the flag, so a
+   * transition that stops halfway can always put the player back somewhere
+   * playable instead of leaving the game stranded.
+   */
+  private readonly transition = createTransition();
   /** The creature a shot hit directly, so its own blast cannot re-bill it. */
   private lastDirectHit: Enemy | null = null;
   /** Hold-to-travel progress at the Beacon. */
@@ -628,12 +639,42 @@ export class Game {
   }
 
   private beginLoad(save: SaveData): void {
+    const def = worldDef(save.worldTheme);
+    // Every load starts from a clean slate of overlays and held interactions.
+    // This is the guarantee that nothing drawn over the last world - a rest
+    // blackout above all - can survive into the next one.
+    this.clearInteractionOverlays();
     this.setState('loading');
-    this.ui.setLoading(0, 'Sculpting the Verdance…');
+    this.ui.setLoading(0, `Shaping ${def.name}…`, def.name);
     this.projectiles.clear();
     this.enemies.clear();
     this.particles.clear();
     this.loadIterator = this.loadSequence(save);
+  }
+
+  /**
+   * Drop everything the player was in the middle of doing.
+   *
+   * Called at the start of every load and on every failed transition. Each
+   * entry here is a piece of state that, left set while the world underneath it
+   * is replaced, is on its own enough to leave the player looking at a black or
+   * unresponsive screen - the rest fade is a full-screen opaque layer, and the
+   * code that would clear it only runs while the player is standing at a rest
+   * site in a world that still exists.
+   */
+  private clearInteractionOverlays(): void {
+    this.ui.fade(false);
+    this.restFadeTimer = 0;
+    this.healing.resting = false;
+    this.healing.restProgress = 0;
+    this.ui.setPrompt(null);
+    this.beaconHold.held = 0;
+    this.beaconHold.committed = false;
+    this.cleanseProgress = 0;
+    this.cleanseTarget = -1;
+    this.pendingStory = null;
+    this.storyBannerTimer = 0;
+    this.hitStopTimer = 0;
   }
 
   private *loadSequence(save: SaveData): Generator<{ progress: number; note: string }, void, void> {
@@ -663,6 +704,9 @@ export class Game {
   }
 
   private finishLoad(save: SaveData): void {
+    // The world itself is built. Everything from here is handing it over, and
+    // it is all still inside the loader's own error handling.
+    noteTransitionProgress(this.transition, 'enter', performance.now());
     this.affinity = save.affinity;
     this.activeElement = resolveActiveElement(save.affinity, save.activeElement);
     this.worldMode = save.worldMode;
@@ -778,9 +822,17 @@ export class Game {
   }
 
   private enterPlay(): void {
-    // The destination built and is playable: the transition is complete, and a
-    // further portal press is allowed again.
-    this.transitioning = false;
+    // The destination built and is playable: the transition is complete, the
+    // recovery snapshot is no longer needed, and a further Beacon hold is
+    // allowed again.
+    completeTransition(this.transition);
+    // Belt and braces on the handover itself. `beginLoad` already cleared these,
+    // but this is the last gate before the player is given control, and a world
+    // handed over under a leftover overlay is invisible however it got there.
+    this.ui.fade(false);
+    this.restFadeTimer = 0;
+    this.beaconHold.held = 0;
+    this.beaconHold.committed = false;
     // Arriving in a world - a new run, a load, or a step through a portal -
     // always begins in exploration, never mid-encounter.
     this.enemies.encounter.reset();
@@ -1030,7 +1082,10 @@ export class Game {
 
     this.ui.tickOverlays(dt);
 
-    if (this.state === 'loading' && this.loadIterator) {
+    // Deliberately not conditional on the iterator existing. A loading state
+    // with nothing left to advance is a dead frame - no world is built and no
+    // 3D pass runs - so `stepLoading` has to see it in order to recover.
+    if (this.state === 'loading') {
       this.stepLoading();
     } else if (this.state === 'playing') {
       this.updatePlaying(dt);
@@ -1083,29 +1138,72 @@ export class Game {
   }
 
   private stepLoading(): void {
+    // A loading state with no iterator left means the loader was lost between
+    // frames. Nothing will ever advance it and nothing renders while it stands,
+    // so it is recovered rather than left as a black screen.
+    if (!this.loadIterator) {
+      this.abandonLoad('abandoned');
+      return;
+    }
     // Nothing else is happening while the world is being built, so the loading
     // step gets a generous slice of the frame. On a slow machine this is the
     // difference between a loading screen that finishes and one that crawls.
     const budgetEnd = performance.now() + 60;
     let last = { progress: 0, note: '' };
+    let finished = false;
     try {
       while (performance.now() < budgetEnd && this.loadIterator) {
         const step = this.loadIterator.next();
-        if (step.done) { this.loadIterator = null; break; }
+        if (step.done) { this.loadIterator = null; finished = true; break; }
         last = step.value;
       }
     } catch (error) {
-      // A failure here used to leave the loading screen spinning forever.
-      // Surface it and return to the title instead of hanging.
-      this.loadIterator = null;
+      // A failure here used to leave the loading screen spinning forever, and
+      // - after a transition - with the destination already committed to disk.
       // eslint-disable-next-line no-console
       console.error('[Elemental Frontier] world load failed', error);
-      this.ui.toast('The world could not be loaded - returning to the title', 'bad', 5);
-      this.refreshTitle();
-      this.setState('title');
+      this.abandonLoad('error');
+      return;
+    }
+    // Report where the load actually got to. The backstop below is measured
+    // against the *percentage*, not against having run: a loader that spins
+    // every frame at the same point is precisely the case worth catching, and
+    // one that keeps climbing is left alone however slowly it climbs.
+    noteTransitionProgress(this.transition, 'load', performance.now(), finished ? 1 : last.progress);
+    if (!finished && transitionStalled(this.transition, performance.now())) {
+      this.abandonLoad('stalled');
       return;
     }
     if (last.note) this.ui.setLoading(last.progress, last.note);
+  }
+
+  /**
+   * Give up on a load and put the player back somewhere playable.
+   *
+   * If a transition was in flight the destination has already been written, so
+   * the pre-transition snapshot is restored first: the world the player came
+   * from is intact on disk, with every upgrade, reward and affinity as it was.
+   * Only then does the game fall back to the title, where Continue reloads that
+   * same world.
+   */
+  private abandonLoad(reason: TransitionFailure): void {
+    this.loadIterator = null;
+    const destination = this.transition.to;
+    const active = isTransitionActive(this.transition);
+    const rollback = failTransition(this.transition, reason);
+    if (rollback) this.restoreSave(rollback);
+    this.clearInteractionOverlays();
+    this.input.exitLock();
+    this.input.clearHeld();
+    const name = destination ? worldDef(isWorldId(destination) ? destination : WORLD_ORDER[0]!).name : '';
+    this.ui.toast(
+      active
+        ? transitionMessage(reason, name)
+        : 'The world could not be loaded - returning to the title',
+      'bad', 6,
+    );
+    this.refreshTitle();
+    this.setState('title');
   }
 
   private updatePlaying(dt: number): void {
@@ -1214,6 +1312,13 @@ export class Game {
     this.updateHealing(dt);
     this.handleInteractions(dt);
     this.updateBeacon(dt);
+
+    // Taking the Beacon tears this world down and starts building the next one
+    // from inside the call above. Nothing below may run against a world that no
+    // longer exists: the autosave would write the old position and terrain over
+    // the destination that was just committed, and a queued story beat would
+    // take the state away from the loader, which then never advances again.
+    if (this.state !== 'playing') return;
 
     this.player.applyToCamera(this.renderer.camera, this.settings.reducedShake ? 0.3 : 1);
     if (this.player.headInWater && !this.settings.reducedFlashes) {
@@ -1741,6 +1846,18 @@ export class Game {
     const pressedE = this.input.wasPressed('KeyE');
     const pos = this.player.position;
 
+    // The Beacon owns the interact key inside its own radius - see the guard
+    // further down, before resting. Cancelling an in-progress rest is done here
+    // rather than there because the sections in between return early, and a
+    // chest or a bush beside the Beacon would otherwise leave a rest running
+    // with its blackout up while the hold to travel charged underneath it.
+    const beaconClaimsHold = this.beaconOwnsInteract();
+    if (beaconClaimsHold && this.healing.resting) {
+      this.healing.resting = false;
+      this.healing.restProgress = 0;
+      this.ui.fade(false);
+    }
+
     // ---- 1. ritual motes (Peaceful Mode)
     const mote = this.shrines.nearestMote(pos);
     if (mote) {
@@ -1818,7 +1935,23 @@ export class Game {
       return;
     }
 
-    // ---- 4. resting at a campfire or cleansed shrine
+    // ---- 5. the Beacon claims the hold before resting can
+    //
+    // The Beacon is sited beside the shrine that finished the world, and a
+    // cleansed shrine is a rest site, so standing on the Beacon put both
+    // interactions under the same key. Holding E charged the Beacon *and*
+    // started a rest - and a rest draws a full-screen blackout that only the
+    // rest code itself takes down. The moment the hold committed, the world was
+    // replaced, that code stopped running, and the blackout stayed up over the
+    // destination for the rest of the session: a world fully loaded and
+    // completely invisible.
+    //
+    // Inside the Beacon's radius the Beacon owns the key. Resting is unchanged
+    // everywhere else, including a few paces away on the same shrine.
+    // The prompt is set by `updateBeacon`, which runs immediately after.
+    if (beaconClaimsHold) return;
+
+    // ---- 6. resting at a campfire or cleansed shrine
     const restProp = this.props.restSiteNear(pos);
     const restShrine = this.shrines.restSiteNear(pos);
     const atRestSite = !!restProp || !!restShrine;
@@ -1902,7 +2035,7 @@ export class Game {
 
     // Travelling is a deliberate hold, never a tap: brushing past the Beacon
     // with a finger on the interact key must not take the world away.
-    const enabled = !this.transitioning;
+    const enabled = !isTransitionActive(this.transition);
     tickBeaconHold(this.beaconHold, dt, this.input.isDown('KeyE'), enabled);
     const progress = beaconHoldFraction(this.beaconHold);
     this.ui.setPrompt(
@@ -2354,12 +2487,35 @@ export class Game {
     };
   }
 
+  /**
+   * Is the player close enough to a live Beacon for it to own the interact key?
+   *
+   * Read by `handleInteractions` before it offers a rest, so the two can never
+   * both act on the same hold. Uses exactly the distance and mode the Beacon
+   * itself uses, so the prompt the player sees and the interaction they get
+   * cannot disagree.
+   */
+  private beaconOwnsInteract(): boolean {
+    if (!this.beacon || !this.save) return false;
+    const dx = this.player.position.x - this.beacon.x;
+    const dz = this.player.position.z - this.beacon.z;
+    const mode = beaconMode(this.worldId, this.save.shrines, this.save.postGame);
+    return beaconOwnsHold(mode, Math.hypot(dx, dz));
+  }
+
   /** Resolve, then apply, a validated standing position. */
   private placePlayerSafely(desired: readonly [number, number, number]): RespawnResult {
     const spawn = this.world.spawn;
+    // A destination arrives from a save file, so it is not trusted to be a
+    // number. A NaN here would propagate silently into the camera and leave the
+    // player nowhere, looking at nothing.
+    const finite = desired.every((n) => Number.isFinite(n));
+    const target: [number, number, number] = finite
+      ? [desired[0], desired[1], desired[2]]
+      : [spawn.x, spawn.y, spawn.z];
     const result = resolveRespawn(
       this.respawnProbe(),
-      desired,
+      target,
       [spawn.x, spawn.y, spawn.z],
       WORLD_SIZE,
     );
@@ -2678,25 +2834,29 @@ export class Game {
    */
   private travelToWorld(target: WorldId): void {
     if (!this.save) return;
-    // A transition is not re-entrant. Holding E on a portal, or a second input
-    // arriving while the world is being torn down, used to start the journey
-    // twice and leave the run layer half-written.
-    if (this.transitioning) return;
     if (!isWorldId(target)) {
       this.ui.toast('That gate leads nowhere - staying put', 'bad', 4);
       return;
     }
-    this.transitioning = true;
     const save = this.save;
 
     // 1. save *before* leaving, so a failure here loses nothing. This snapshot
-    // is the recovery point if anything below fails.
+    // is the recovery point for every failure below, right through to the last
+    // frame of the destination's load.
     this.persist();
     const rollback = JSON.stringify(save);
 
+    // 2. claim the transition. A transition is not re-entrant: holding E at the
+    // Beacon, a queued input arriving while the world is being torn down, or a
+    // second call from anywhere else is refused rather than stacking a second
+    // world load on top of the first.
+    if (!beginTransition(this.transition, this.worldId, target, rollback, performance.now())) return;
+
+    // 3. compose the destination. Nothing outside `save` has been touched yet,
+    // so a failed write below costs a rollback of this object and nothing more.
+    const completed = [...save.worldsCompleted];
     if (!save.worldsCompleted.includes(this.worldId)) save.worldsCompleted.push(this.worldId);
     save.worldHearts[this.worldId] = true;
-    this.worldsCompleted = [...save.worldsCompleted];
 
     save.worldTheme = target;
     save.checkpointWorld = target;
@@ -2714,40 +2874,73 @@ export class Game {
     save.energy = -1;
     save.runStats.worldsReached = Math.max(save.runStats.worldsReached, worldIndex(target));
 
-    this.run.worldTheme = target;
-    this.beacon = null;
-
+    // 4. commit. Until this succeeds the player has not left anywhere.
     if (!writeSave(window.localStorage, save)) {
-      // The destination was never committed, so put the save back exactly as
-      // it was and leave the player where they are, still able to play.
-      this.restoreSave(rollback);
-      this.transitioning = false;
-      this.ui.toast(
-        'Could not write the save - staying in this world. Your progress is intact.',
-        'bad', 5,
-      );
+      // The destination was never committed, so put the save back exactly as it
+      // was and leave the player standing where they are, still able to play.
+      this.cancelTransition('write', completed);
       return;
     }
 
+    // 5. hand the world over. From here the previous save exists only in the
+    // rollback snapshot the transition is holding.
+    this.worldsCompleted = [...save.worldsCompleted];
+    this.run.worldTheme = target;
+    this.releaseBeacon();
     this.pendingIsNew = false;
     this.audio.play('shrine-cleanse');
     try {
       this.beginLoad(save);
     } catch (error) {
-      // Initialisation failed after the write. The previous valid save is
-      // still on disk under the rollback snapshot, so restore it rather than
-      // leaving the player stranded in a world that did not build.
+      // `beginLoad` only *starts* the loader; a failure inside the world build
+      // surfaces frames later in `stepLoading`, which recovers the same way.
       // eslint-disable-next-line no-console
       console.error('[Elemental Frontier] world transition failed', error);
-      this.restoreSave(rollback);
-      this.transitioning = false;
-      this.ui.toast(
-        'That world could not be opened - you are back at your last checkpoint.',
-        'bad', 6,
-      );
-      this.refreshTitle();
-      this.setState('title');
+      this.abandonLoad('error');
     }
+  }
+
+  /**
+   * Back out of a transition that never left the ground.
+   *
+   * Used only before the destination is committed, so there is nothing to load
+   * and nothing to fall back to: the player keeps playing the world they are
+   * standing in, with the save exactly as it was.
+   */
+  private cancelTransition(reason: TransitionFailure, completed: readonly WorldId[]): void {
+    const destination = this.transition.to;
+    const rollback = failTransition(this.transition, reason);
+    if (rollback) this.restoreSave(rollback);
+    this.worldsCompleted = [...completed];
+    this.beaconHold.held = 0;
+    this.beaconHold.committed = false;
+    const name = isWorldId(destination) ? worldDef(destination).name : 'that world';
+    this.ui.toast(transitionMessage(reason, name), 'bad', 5);
+  }
+
+  /**
+   * Take the Beacon out of the scene.
+   *
+   * The group is removed and its own geometries and materials are disposed -
+   * they are built per Beacon by `buildBeacon` and shared with nothing else.
+   * The terrain material, the prop atlas and the render targets belong to their
+   * own systems and are deliberately left alone.
+   */
+  private releaseBeacon(): void {
+    const beacon = this.beacon;
+    this.beacon = null;
+    this.beaconHold.held = 0;
+    this.beaconHold.committed = false;
+    if (!beacon?.object) return;
+    beacon.object.removeFromParent();
+    beacon.object.traverse((node) => {
+      const mesh = node as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      mesh.geometry.dispose();
+      const material = mesh.material;
+      if (Array.isArray(material)) for (const m of material) m.dispose();
+      else material.dispose();
+    });
   }
 
   /**
@@ -2764,6 +2957,9 @@ export class Game {
       if (!result.ok || !result.data) return;
       this.save = result.data;
       this.run.worldTheme = result.data.worldTheme;
+      // The in-memory copies of the fields a transition edits have to come back
+      // with it, or the recovered save and the running game disagree.
+      this.worldsCompleted = [...result.data.worldsCompleted];
       writeSave(window.localStorage, result.data);
     } catch {
       // Nothing further to do: the on-disk save was never overwritten in the

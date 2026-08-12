@@ -1,5 +1,85 @@
 # Changelog
 
+## v1.0.2 — Black screen after the Beacon transition
+
+### The bug
+
+Taking the World Beacon left the screen completely black, and the next world
+never became playable.
+
+The cause was two features quietly sharing one key. The Beacon is deliberately
+sited **beside the shrine the player finished last** — and a cleansed shrine is
+also a **rest site**. Both are used by *holding* `E`. So holding `E` at the
+Beacon did both things at once: it charged the hold to travel, and it started a
+rest. A rest draws a full-screen opaque blackout.
+
+The moment the hold committed, the world was torn down and the game left the
+playing state. From that frame on, the only code that ever takes the blackout
+down — which runs while the player is standing at a rest site, in a world that
+still exists — never ran again. Arriving in the destination reset the rest
+state to "not resting", so even the release path was skipped. The next world
+loaded correctly, ran correctly and was fully playable underneath an opaque
+black layer that nothing would ever remove.
+
+### The fix
+
+- **Inside its own radius, the Beacon owns the interact hold.** A player who
+  walked to the way out is leaving, not sleeping. Resting is unchanged
+  everywhere else — at every campfire, at every other shrine, and a few paces
+  away on the same shrine, whose rest radius is wider than the Beacon's.
+- **The black fade itself is untouched.** Its length, its opacity and how
+  resting uses it are exactly as they were; the bug was ownership of the key and
+  missing cleanup, and that is what changed.
+- **Every load now starts from a clean slate of overlays** — fade, prompt,
+  interact holds, cleanse progress, queued story beat, hit-stop — so no future
+  overlay can survive a world change either.
+
+### Transitions are now recoverable
+
+- **Added a transition state machine** (`src/game/transition.ts`) that owns the
+  in-flight flag, the pre-transition save snapshot and the stall backstop. It is
+  engine-free, so the whole lifecycle is driven deterministically in tests
+  rather than needing a browser.
+- **Rollback actually reaches the failure.** The old `try`/`catch` wrapped
+  `beginLoad`, which only *starts* the loader — every real failure happens
+  frames later while the world is being built, where nothing was catching it. A
+  failure at any point now restores the pre-transition save, and the player
+  lands back at their last checkpoint with every upgrade, reward and affinity
+  intact.
+- **A failed transition no longer disables the Beacon for the session.** The
+  in-flight flag used to be cleared only on success.
+- **A stall backstop** ends a transition that has genuinely stopped producing
+  anything for 45 seconds. It measures *silence*, not duration — any progress
+  resets it — so a slow machine still finishes rather than being thrown out.
+- **The frame stops at the transition.** `updatePlaying` used to keep running
+  for another forty lines after the Beacon replaced the world: an autosave
+  landing on that frame wrote the old position and terrain over the destination
+  that had just been committed, and a queued story beat took the state away from
+  the loader, which then never advanced again.
+- **A loading state with nothing left to advance now recovers** instead of
+  sitting on a dead frame that never renders.
+- **Beacon activation is idempotent** — a second commit is refused rather than
+  stacking a second world load.
+- **The Beacon's own geometry and materials are disposed** when it is used. The
+  terrain material, prop atlas and render targets are shared and deliberately
+  left alone.
+- **A destination position that is not a finite number** falls back to the
+  validated spawn rather than propagating into the camera.
+
+### Loading presentation
+
+The loading title was fixed in the markup and read "Shaping the Verdance"
+whichever world was actually being built. It now names the destination, above
+the existing spinner, progress bar and per-stage message.
+
+### Compatibility
+
+Save schema unchanged at version **5**. No migration, no reset, no rerolled
+affinity, no lost upgrades. A save already sitting in an affected world is
+unaffected by the bug in the first place — the blackout lived only in the page,
+never in the save, so reloading such a save already showed the world correctly,
+and it still does.
+
 ## v1.0.1 — World Beacon hotfix
 
 ### World travel was unavailable in practice
